@@ -247,6 +247,11 @@ class GitLabReview(GitLabWriter):
     def close_mr(self, project_id: int, iid: int) -> None:
         self.c.request("PUT", f"/api/v4/projects/{project_id}/merge_requests/{iid}", json={"state_event": "close"})
 
+    def merge_when_green(self, project_id: int, iid: int, sha: str) -> None:
+        self.c.request("PUT", f"/api/v4/projects/{project_id}/merge_requests/{iid}/merge",
+                       json={"sha": sha, "auto_merge": True, "merge_when_pipeline_succeeds": True,
+                             "should_remove_source_branch": True})
+
 
 class GitLabApprover(GitLab):
     """The approver's own client: a refusal (401/403) pauses this token's client, never the bot's."""
@@ -418,6 +423,9 @@ class GitLabHost:
 
     def close_mr(self, repo_id: Id, iid: Id) -> None:
         self.api.close_mr(repo_id, iid)
+
+    def merge_when_green(self, repo_id: Id, iid: Id, sha: str) -> None:
+        self.api.merge_when_green(repo_id, iid, sha)
 
     def upload(self, repo_id: Id, name: str, data: bytes, mime: str) -> str:
         return self.api.upload(repo_id, name, data, mime)
