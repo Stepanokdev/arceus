@@ -29,6 +29,10 @@ HEADS = {"passed": "No problems found", "partial": "No problems in what was chec
          "unfinished": "Did not finish", "stopped": "Stopped"}
 RESULT_WORDS = {"ok": "Works", "problem": "Problem", "blocked": "Could not check", "skipped": "Skipped"}
 SEVERITY_WORDS = {"critical": "Critical", "major": "Major", "minor": "Minor"}
+# What the report can be filtered to: the problems, then the checks by their result.
+FILTERS = (("finding", "Findings"), ("ok", "Works"), ("problem", "Problem"), ("blocked", "Could not check"),
+           ("skipped", "Skipped"))
+NEW_TAB = ' target="_blank" rel="noopener"'
 
 STYLE = """
 :root {
@@ -118,16 +122,72 @@ td .blocked { color: var(--bad); } td .stopped { color: var(--quiet); }
 .run-summary { color: var(--muted); font-size: 0.9rem; display: block; margin-top: 2px; }
 .run-scenario { color: var(--muted); font-size: 0.875rem; display: block; }
 .empty { padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.qa-radio { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.qa-filter { display: flex; flex-wrap: wrap; gap: 8px; margin: 32px 0 0; }
+.qa-filter label, .qa-filter .qa-off { padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px;
+                                       background: var(--surface); font-size: 0.9rem; cursor: pointer; }
+.qa-filter b { margin-left: 4px; color: var(--muted); font-weight: 600; }
+.qa-filter .qa-off { opacity: 0.5; cursor: default; }
+.qa-radio:focus-visible ~ .qa-filter { outline: 2px solid var(--blue); outline-offset: 4px; border-radius: 8px; }
+.qa-group h3 { margin: 20px 0 8px; font-size: 1rem; color: var(--muted); }
+.qa-item { margin: 0 0 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.qa-item > summary { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; padding: 10px 16px;
+                     cursor: pointer; list-style: none; color: var(--ink); }
+.qa-item > summary::-webkit-details-marker { display: none; }
+.qa-item > summary::before { content: "\\25B8"; width: 1em; color: var(--muted); }
+.qa-item[open] > summary::before { content: "\\25BE"; }
+.qa-item:target { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-soft); }
+.qa-item:target::details-content { content-visibility: visible; }
+.qa-title { flex: 1 1 16rem; font-weight: 600; }
+.qa-chip { padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted);
+           font: 0.8rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
+.qa-meta { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+.qa-body { padding: 4px 16px 16px; border-top: 1px solid var(--line); }
+.qa-body .meta { margin: 12px 0 0; color: var(--muted); font-size: 0.9rem; overflow-wrap: anywhere; }
+.qa-spec { margin: 12px 0 0; padding: 10px 14px; background: var(--blue-soft); border-left: 3px solid var(--blue);
+           border-radius: 0 6px 6px 0; }
+.qa-spec h4 { margin: 0 0 4px; font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+.qa-spec p { margin: 0; white-space: pre-line; }
+.qa-none { color: var(--muted); }
+.qa-tried { margin: 12px 0 0; font-weight: 600; }
+.qa-note { margin: 12px 0 0; }
+.qa-cases { list-style: none; margin: 12px 0 0; padding: 0; }
+.qa-cases li { display: grid; grid-template-columns: 9.5rem 1fr; gap: 12px; padding: 6px 0;
+               border-top: 1px solid var(--line); }
+.qa-cases li:first-child { border-top: 0; }
+.qa-cases .note { display: block; color: var(--muted); font-size: 0.9rem; }
+.qa-open { display: block; margin-top: 4px; font-size: 0.85rem; }
 footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; }
 footer ul { padding-left: 20px; }
 @media (max-width: 640px) {
   main { padding-top: 20px; }
   .compare { grid-template-columns: 1fr; }
-  .checks li { grid-template-columns: 1fr; gap: 4px; }
+  .checks li, .qa-cases li { grid-template-columns: 1fr; gap: 4px; }
   .facts { grid-template-columns: 1fr; gap: 0; } .facts dd { margin-bottom: 6px; }
   .hide-narrow { display: none; }
 }
 """
+
+
+def _filter_css() -> str:
+    """
+    The filter's rules, one set per kind of FILTERS: its label lit, the other list hidden, and for a check result
+    the checks and groups of other results hidden.
+    """
+    results = [kind for kind, __ in FILTERS if kind != "finding"]
+    lit = ",\n".join(f'#qa-show-{kind}:checked ~ .qa-filter label[for="qa-show-{kind}"]'
+                     for kind in ["all", *(kind for kind, __ in FILTERS)])
+    hide = ["#qa-show-finding:checked ~ .qa-checks"]
+    hide += [f"#qa-show-{kind}:checked ~ .qa-findings" for kind in results]
+    for kind in results:
+        hide += [f"#qa-show-{kind}:checked ~ .qa-checks .qa-item:not(.{kind})",
+                 f"#qa-show-{kind}:checked ~ .qa-checks .qa-group:not(:has(.qa-item.{kind}))"]
+    hidden = ",\n".join(hide)
+    return (f"{lit} {{\n  color: var(--blue); background: var(--blue-soft); border-color: var(--blue); }}\n"
+            f"{hidden} {{ display: none; }}\n")
+
+
+STYLE += _filter_css()
 
 
 def e(value: object) -> str:
@@ -181,59 +241,167 @@ def _page(title: str, body: str, style: str = "") -> str:
             f'</head>\n<body>\n<main>\n{body}\n</main>\n</body>\n</html>\n')
 
 
-def _shot(s: dict) -> str:
-    src = f"media/{e(s['file'])}"
-    caption = f"<figcaption>{rich(s['caption'])}</figcaption>" if s.get("caption") else ""
-    if s.get("kind") == "video":
-        thing = f'<video src="{src}" controls preload="metadata"></video>'
+def _shot(shot: dict) -> str:
+    """
+    A screenshot or recording; either opens on its own in a new tab.
+    """
+    src = f"media/{e(shot['file'])}"
+    caption = f"<figcaption>{rich(shot['caption'])}</figcaption>" if shot.get("caption") else ""
+    if shot.get("kind") == "video":
+        thing = (f'<video src="{src}" controls preload="metadata"></video>'
+                 f'<a class="qa-open" href="{src}"{NEW_TAB}>Open in a new tab</a>')
     else:
-        thing = f'<a href="{src}"><img src="{src}" alt="{e(s.get("caption") or "Screenshot")}"></a>'
+        thing = f'<a href="{src}"{NEW_TAB}><img src="{src}" alt="{e(shot.get("caption") or "Screenshot")}"></a>'
     return f"<figure>{thing}{caption}</figure>"
 
 
-def _finding(i: int, f: dict) -> str:
-    sev = f.get("severity") or "major"
+def _spec_ref(spec: dict | None) -> str:
+    """
+    The requirement's numbers as a chip for an accordion's line: `US-2 · 2.3`.
+    """
+    numbers = [spec.get(key) for key in ("story", "point") if spec and spec.get(key)]
+    return f'<span class="qa-chip">{e(" · ".join(numbers))}</span>' if numbers else ""
+
+
+def _requirement(spec: dict | None) -> str:
+    """
+    The requirement a check or finding is about: its story, its point and its text, as the tester cited them.
+    """
+    if not spec:
+        return ('<div class="qa-spec"><h4>Requirement</h4><p class="qa-none">No requirement cited by the tester.</p>'
+                "</div>")
+    where = ", ".join(label for label in (f"Story {e(spec['story'])}" if spec.get("story") else "",
+                                          f"point {e(spec['point'])}" if spec.get("point") else "") if label)
+    text = f'"{rich(spec["text"])}"' if spec.get("text") else ""
+    line = f"<strong>{where}</strong>{': ' if where and text else ''}{text}"
+    return f'<div class="qa-spec"><h4>Requirement</h4><p>{line}</p></div>'
+
+
+def _check(check: dict) -> str:
+    """
+    One check as an accordion: its result, what it was, its requirement and the cases it was made of. A check that
+    could not be done or was skipped says whether any of it was tried.
+    """
+    result = check["result"]
+    listed = check.get("cases")  # None: the tester did not list them (and reports from before cases)
+    cases = listed or []
+    tally = ""
+    if cases:
+        passed = sum(case["result"] == "ok" for case in cases)
+        tally = f'<span class="qa-meta">{passed} of {len(cases)} cases ok</span>'
+    summary = (f'<summary><span class="tag {e(result)}">{RESULT_WORDS.get(result, e(result))}</span>'
+               f'<span class="qa-title">{rich(check["what"])}</span>{_spec_ref(check.get("spec"))}{tally}</summary>')
+    body = [_requirement(check.get("spec"))]
+    if listed is None:
+        body.append('<p class="qa-none">The tester did not list the cases checked.</p>')
+    elif result in ("blocked", "skipped"):
+        tried = sum(case["result"] in ("ok", "problem") for case in cases)
+        body.append(f'<p class="qa-tried">Tried {tried} of {len(cases)} cases before it stopped.</p>' if tried
+                    else '<p class="qa-tried">Nothing of this check was tried.</p>')
+    if cases:
+        body.append('<ul class="qa-cases">' + "".join(
+            f'<li><span class="tag {e(case["result"])}">{RESULT_WORDS.get(case["result"], e(case["result"]))}</span>'
+            f'<span>{rich(case["what"])}'
+            + (f'<span class="note">{rich(case["note"])}</span>' if case.get("note") else "") + "</span></li>"
+            for case in cases) + "</ul>")
+    if check.get("note"):
+        label = "Reason" if result in ("blocked", "skipped") else "Note"
+        body.append(f'<p class="qa-note"><strong>{label}:</strong> {rich(check["note"])}</p>')
+    if check.get("finding"):
+        number = int(check["finding"])
+        body.append(f'<p><a href="#f{number}"{NEW_TAB}>See problem {number}</a></p>')
+    return (f'<details class="qa-item {e(result)}">{summary}<div class="qa-body">{"".join(body)}</div>'
+            "</details>")
+
+
+def _board(tested: list[dict], findings: list[dict]) -> str:
+    """
+    The problems and the checks as accordions under a filter by type. The filter is radio buttons the stylesheet
+    reads (STYLE): the pages run no script.
+    """
+    counts = {"finding": len(findings), **{result: sum(check["result"] == result for check in tested)
+                                           for result in RESULT_WORDS}}
+    radios = ['<input type="radio" class="qa-radio" name="qa-show" id="qa-show-all" checked>']
+    labels = [f'<label for="qa-show-all">All <b>{len(findings) + len(tested)}</b></label>']
+    for kind, word in FILTERS:
+        if counts[kind]:
+            radios.append(f'<input type="radio" class="qa-radio" name="qa-show" id="qa-show-{kind}">')
+            labels.append(f'<label for="qa-show-{kind}">{word} <b>{counts[kind]}</b></label>')
+        else:
+            labels.append(f'<span class="qa-off">{word} <b>0</b></span>')
+    parts = radios + [f'<nav class="qa-filter" aria-label="Show">{"".join(labels)}</nav>',
+                      '<section class="qa-findings"><h2>Problems</h2>']
+    parts += [_finding(number, finding) for number, finding in enumerate(findings, 1)] if findings \
+        else ['<p class="empty">None reported.</p>']
+    parts.append('</section><section class="qa-checks"><h2>What was checked</h2>')
+    if not tested:
+        parts.append('<p class="empty">The agent did not say what it checked.</p>')
+    groups: dict[str, list[dict]] = {}
+    for check in tested:
+        groups.setdefault(check.get("group") or "", []).append(check)
+    named = any(groups)
+    for group in sorted(groups, key=lambda name: name == ""):
+        heading = group or ("Other checks" if named else "")
+        parts.append('<div class="qa-group">' + (f"<h3>{rich(heading)}</h3>" if heading else "")
+                     + "".join(_check(check) for check in groups[group]) + "</div>")
+    parts.append("</section>")
+    return '<div class="qa-board">' + "\n".join(parts) + "</div>"
+
+
+def _finding(number: int, finding: dict) -> str:
+    """
+    One problem as an accordion: its severity, title and requirement on its line, then its steps with their
+    screenshots, expected against actual, and the suspected cause.
+    """
+    severity = finding.get("severity") or "major"
     tries = ""
-    if f.get("attempts"):
-        tries = f"Happened {f.get('reproduced') or 0} of {f['attempts']} times"
-        if (f.get("reproduced") or 0) < 2:
+    if finding.get("attempts"):
+        tries = f"Happened {finding.get('reproduced') or 0} of {finding['attempts']} times"
+        if (finding.get("reproduced") or 0) < 2:
             tries += ", may be intermittent"
-    meta = [x for x in (tries, f'<a href="{e(f["url"])}">{e(f["url"])}</a>' if f.get("url") else "") if x]
-    parts = [f'<article class="finding" id="f{i}">',
-             f'<header><h3>{rich(f["title"])}</h3><span class="tag {e(sev)}">{SEVERITY_WORDS.get(sev, e(sev))}</span>'
-             f'</header>']
+    url = finding.get("url")
+    link = f'<a href="{e(url)}"{NEW_TAB}>{e(url)}</a>' if url else ""
+    meta = [text for text in (tries, link) if text]
+    parts = [f'<details class="qa-item qa-finding" id="f{number}">',
+             f'<summary><span class="tag {e(severity)}">{SEVERITY_WORDS.get(severity, e(severity))}</span>'
+             f'<span class="qa-title">{rich(finding["title"])}</span>{_spec_ref(finding.get("spec"))}</summary>',
+             '<div class="qa-body">']
     if meta:
         parts.append(f'<p class="meta">{"<br>".join(meta)}</p>')
+    parts.append(_requirement(finding.get("spec")))
     by_step: dict[int, list[dict]] = {}
     loose = []
-    for s in f.get("evidence") or []:
-        (by_step.setdefault(s["step"], []) if s.get("step") else loose).append(s)
-    if f.get("steps"):
+    for shot in finding.get("evidence") or []:
+        (by_step.setdefault(shot["step"], []) if shot.get("step") else loose).append(shot)
+    if finding.get("steps"):
         parts.append('<ol class="steps">')
-        for n, step in enumerate(f["steps"], 1):
-            cls = ' class="failed"' if f.get("failed_step") == n else ""
-            shots = by_step.get(n) or []
-            parts.append(f'<li{cls}><span class="text">{rich(step)}</span>'
-                         + (f'<div class="shots">{"".join(_shot(s) for s in shots)}</div>' if shots else "")
+        for step_number, step in enumerate(finding["steps"], 1):
+            failed = ' class="failed"' if finding.get("failed_step") == step_number else ""
+            shots = by_step.get(step_number) or []
+            parts.append(f'<li{failed}><span class="text">{rich(step)}</span>'
+                         + (f'<div class="shots">{"".join(_shot(shot) for shot in shots)}</div>' if shots else "")
                          + "</li>")
         parts.append("</ol>")
-    if f.get("expected") or f.get("actual"):
+    if finding.get("expected") or finding.get("actual"):
         parts.append('<div class="compare">'
-                     f'<div><h4>Expected</h4><p>{rich(f.get("expected")) or "Not said"}</p></div>'
-                     f'<div class="actual"><h4>Actual</h4><p>{rich(f.get("actual")) or "Not said"}</p></div></div>')
+                     f'<div><h4>Expected</h4><p>{rich(finding.get("expected")) or "Not said"}</p></div>'
+                     f'<div class="actual"><h4>Actual</h4><p>{rich(finding.get("actual")) or "Not said"}</p></div>'
+                     "</div>")
     if loose:
-        parts.append(f'<div class="shots">{"".join(_shot(s) for s in loose)}</div>')
-    if f.get("cause") or f.get("code"):
+        parts.append(f'<div class="shots">{"".join(_shot(shot) for shot in loose)}</div>')
+    if finding.get("cause") or finding.get("code"):
         code = []
-        for c in f.get("code") or []:
-            where = f"{c['repo']}/{c['file']}" if c.get("repo") else c["file"]
-            where += f":{c['line']}" if c.get("line") else ""
-            label = f"<code>{e(where)}</code>" + (f" at <code>{e(c['sha'][:12])}</code>" if c.get("sha") else "")
-            code.append(f'<li><a href="{e(c["url"])}">{label}</a></li>' if c.get("url") else f"<li>{label}</li>")
+        for place in finding.get("code") or []:
+            where = f"{place['repo']}/{place['file']}" if place.get("repo") else place["file"]
+            where += f":{place['line']}" if place.get("line") else ""
+            label = f"<code>{e(where)}</code>" + (f" at <code>{e(place['sha'][:12])}</code>" if place.get("sha")
+                                                  else "")
+            code.append(f'<li><a href="{e(place["url"])}"{NEW_TAB}>{label}</a></li>' if place.get("url")
+                        else f"<li>{label}</li>")
         parts.append('<div class="cause"><h4>Suspected cause in the code, not confirmed</h4>'
-                     + (f"<p>{rich(f['cause'])}</p>" if f.get("cause") else "")
+                     + (f"<p>{rich(finding['cause'])}</p>" if finding.get("cause") else "")
                      + (f"<ul>{''.join(code)}</ul>" if code else "") + "</div>")
-    parts.append("</article>")
+    parts.append("</div></details>")
     return "\n".join(parts)
 
 
@@ -281,21 +449,8 @@ def run_body(view: dict, project: str, tz: ZoneInfo) -> tuple[str, str]:
     if doubts:
         body.append('<div class="alert note"><p><strong>Not a clean result:</strong></p><ul>'
                     + "".join(f"<li>{e(x)}</li>" for x in doubts) + "</ul></div>")
-    tested = view.get("tested") or []
-    body.append("<h2>What was checked</h2>")
-    if tested:
-        body.append('<ul class="checks">' + "".join(
-            f'<li><span class="tag {e(t["result"])}">{RESULT_WORDS.get(t["result"], e(t["result"]))}</span>'
-            f'<span>{rich(t["what"])}' + (f'<span class="note">{rich(t["note"])}</span>' if t.get("note") else "")
-            + "</span></li>" for t in tested) + "</ul>")
-    else:
-        body.append('<p class="empty">The agent did not say what it checked.</p>')
-    body.append("<h2>Problems</h2>")
-    if findings:
-        body += [_finding(i, f) for i, f in enumerate(findings, 1)]
-    else:
-        body.append('<p class="empty">None reported.</p>')
-    problems = view.get("problems") or []
+    body.append(_board(view.get("tested") or [], findings))
+    problems = [*(view.get("problems") or []), *(view.get("notes") or [])]
     if problems:
         body.append('<div class="alert note"><p><strong>Left out of this report</strong> (the agent\'s report did not '
                     'hold up there):</p><ul>' + "".join(f"<li>{e(p)}</li>" for p in problems) + "</ul></div>")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import urllib.error
 import urllib.request
@@ -1039,7 +1040,8 @@ def test_findings_are_read_defensively(tmp_path):
                      {"severity": "minor"}]}))
     data, problems = load_findings(folder, dest)
     assert len(data["summary"]) < 1600
-    assert data["tested"] == [{"what": "A", "result": "skipped", "note": ""}]
+    assert data["tested"] == [{"what": "A", "result": "skipped", "note": "", "group": "", "spec": None,
+                               "cases": None, "finding": None}]
     [f] = data["findings"]
     assert (f["severity"], f["url"], f["failed_step"]) == ("major", "", None)
     assert [e["step"] for e in f["evidence"]] == [1]
@@ -1395,3 +1397,267 @@ def test_a_run_reviewed_before_the_totals_were_left_out_keeps_its_parts_as_revie
     passed(w)
     run = w.store.run(RID)
     assert run.state == "done" and len(sends(w)) == 1 and "engine_disputed" not in json.loads(run.result)
+
+
+def test_a_check_keeps_its_group_its_cases_its_requirement_and_its_finding(tmp_path):
+    """
+    Test that a check keeps its group, cases, requirement and finding number, bounded and cleaned, and that a
+    check in the old shape still loads with empty new fields.
+    """
+    folder, dest = tmp_path / "out", tmp_path / "dest"
+    folder.mkdir()
+    spec = {"story": "US-2", "point": "2.3", "text": "The total shows the discount."}
+    (folder / "findings.json").write_text(json.dumps({
+        "tested": [{"what": "Discount code", "result": "problem", "group": "US-2 Cart", "spec": spec,
+                    "cases": [{"what": "TEST10 on one item", "result": "ok"},
+                              {"what": "TEST10 on two items", "result": "problem", "note": "no discount"},
+                              {"what": "Expired code", "result": "weird"}, "nonsense", {"result": "ok"}],
+                    "finding": 1},
+                   {"what": "Points", "result": "ok", "finding": 9, "spec": {"story": 5, "text": ""},
+                    "cases": [{"what": f"case {i}", "result": "ok"} for i in range(40)]},
+                   {"what": "Old shape", "result": "blocked", "note": "no mail"}],
+        "findings": [{"title": "No discount on two items", "spec": spec, "steps": ["a"]}]}))
+    data, __ = load_findings(folder, dest)
+    first, second, old = data["tested"]
+    assert first["group"] == "US-2 Cart" and first["spec"] == spec and first["finding"] == 1
+    assert [c["result"] for c in first["cases"]] == ["ok", "problem", "skipped"]
+    assert first["cases"][1] == {"what": "TEST10 on two items", "result": "problem", "note": "no discount"}
+    assert second["spec"] is None and second["finding"] is None and len(second["cases"]) == 40
+    assert old == {"what": "Old shape", "result": "blocked", "note": "no mail", "group": "", "spec": None,
+                   "cases": None, "finding": None}
+    assert data["findings"][0]["spec"] == spec
+
+
+def _loaded(tmp_path, report: dict) -> tuple[dict, list[str]]:
+    folder = tmp_path / "out"
+    folder.mkdir()
+    (folder / "findings.json").write_text(json.dumps(report))
+    return load_findings(folder, tmp_path / "dest")
+
+
+def test_every_case_is_kept_and_the_run_still_passes(tmp_path):
+    """
+    Test that a check keeps all its cases, however many, and a run of such checks that all worked passes.
+    """
+    data, problems = _loaded(tmp_path, {"tested": [
+        {"what": "Many", "result": "ok", "cases": [{"what": f"case {i}", "result": "ok"} for i in range(100)]}]})
+    assert len(data["tested"][0]["cases"]) == 100 and data["notes"] == [] and problems == []
+    assert outcome_of(data, problems, [], False) == ("passed", [])
+
+
+def test_a_case_with_no_what_is_noted_but_does_not_change_the_outcome(tmp_path):
+    """
+    Test that a case with no readable `what` is left out and named among the notes, and the run still passes.
+    """
+    data, problems = _loaded(tmp_path, {"tested": [
+        {"what": "Many", "result": "ok", "cases": [{"what": "one", "result": "ok"}, {"result": "ok"}]}]})
+    assert len(data["tested"][0]["cases"]) == 1 and problems == []
+    assert data["notes"] == ["a case of the check 'Many' has no readable `what`"]
+    assert outcome_of(data, problems, [], False) == ("passed", [])
+
+
+def test_a_check_links_to_the_finding_as_the_report_numbers_it(tmp_path):
+    """
+    Test that a check's `finding`, the agent's place in `findings`, links to that finding's number in the report,
+    which skips untitled ones; that one pointing at a dropped finding links nowhere; and that a check not marked
+    a problem links nowhere. Both are named in the notes, not the problems.
+    """
+    data, problems = _loaded(tmp_path, {
+        "tested": [{"what": "B", "result": "problem", "finding": 3},
+                   {"what": "Untitled", "result": "problem", "finding": 1},
+                   {"what": "Fine", "result": "ok", "finding": 2}],
+        "findings": [{"title": ""}, {"title": "A"}, {"title": "B"}]})
+    assert [f["title"] for f in data["findings"]] == ["A", "B"]
+    assert [c["finding"] for c in data["tested"]] == [2, None, None]
+    assert any("'Untitled' names finding 1, but finding 1 is not in the report" in n for n in data["notes"])
+    assert any("'Fine' is marked ok but names finding 2" in n for n in data["notes"])
+    assert not any("'Fine'" in p or "'Untitled'" in p for p in problems)
+
+
+def test_a_dangling_finding_number_is_noted_and_the_run_still_passes(tmp_path):
+    """
+    Test that an ok check naming a finding, and a problem check naming one that does not exist, are noted
+    without changing the outcome.
+    """
+    data, problems = _loaded(tmp_path, {
+        "tested": [{"what": "Cart", "result": "problem", "finding": 5}, {"what": "Fine", "result": "ok"}],
+        "findings": [{"title": "A", "steps": ["a"]}]})
+    assert data["tested"][0]["finding"] is None and problems == []
+    assert data["notes"] == ["the check 'Cart' names finding 5, but finding 5 is not in the report, so the link "
+                             "is not shown"]
+    assert outcome_of(data, problems, [], False) == ("found", [])
+    only_ok, problems = load_findings(*_rewrite(tmp_path, {
+        "tested": [{"what": "Fine", "result": "ok", "finding": 1}]}))
+    assert problems == [] and outcome_of(only_ok, problems, [], False) == ("passed", [])
+
+
+def _rewrite(tmp_path, report: dict) -> tuple[Path, Path]:
+    (tmp_path / "out" / "findings.json").write_text(json.dumps(report))
+    return tmp_path / "out", tmp_path / "dest"
+
+
+def test_a_case_marked_as_a_problem_with_no_finding_is_unfinished(tmp_path):
+    """
+    Test that a check marked ok whose case is a problem, with no finding, does not pass; with a finding, the run
+    found it.
+    """
+    check = {"what": "Discount", "result": "ok", "cases": [{"what": "Two items", "result": "problem"}]}
+    data, problems = _loaded(tmp_path, {"tested": [check]})
+    assert outcome_of(data, problems, [], False) == (
+        "unfinished", ["a case of a check is marked as a problem, but no finding says what the problem is"])
+    found, problems = load_findings(*_rewrite(tmp_path, {"tested": [check], "findings": [{"title": "A"}]}))
+    assert outcome_of(found, problems, [], False)[0] == "found"
+
+
+def _qa_run_view(**overrides) -> dict:
+    """
+    A run's view as result.json holds it: checks of every result in three groups and one without, a finding with
+    its requirement and media and one in the old shape.
+    """
+    spec = {"story": "US-2", "point": "2.3", "text": "The total shows <the> discount."}
+    return {"n": 7, "outcome": "found", "source": "command", "repos": [],
+            "tested": [{"what": "Sign-in", "result": "ok", "group": "US-1 Sign-in",
+                        "spec": {"story": "US-1", "point": "1.1", "text": "A customer signs in."},
+                        "cases": [{"what": "Right password", "result": "ok", "note": ""},
+                                  {"what": "Wrong password shows an error", "result": "ok", "note": ""}]},
+                       {"what": "Discount code", "result": "problem", "group": "US-2 Cart", "spec": spec,
+                        "cases": [{"what": "On two items", "result": "problem", "note": ""}], "finding": 1},
+                       {"what": "Password reset mail", "result": "blocked", "group": "US-1 Sign-in",
+                        "note": "The stand sends no mail.", "cases": []},
+                       {"what": "Order history", "result": "skipped", "group": "US-3 Orders",
+                        "note": "Out of time.", "cases": [{"what": "First page", "result": "ok", "note": ""},
+                                                          {"what": "Paging", "result": "skipped", "note": ""},
+                                                          {"what": "Filter", "result": "skipped", "note": ""}]},
+                       {"what": "Before the update", "result": "ok", "note": "worked"}],
+            "findings": [{"title": "No discount on two items", "severity": "major", "spec": spec,
+                          "url": "https://staging.example.com/cart", "steps": ["Open the cart", "Apply TEST10"],
+                          "failed_step": 2, "expected": "10% off.", "actual": "Full price.",
+                          "evidence": [{"file": "abc.png", "caption": "Cart", "step": 2, "kind": "image"},
+                                       {"file": "abc.webm", "caption": "Clip", "kind": "video"}],
+                          "reproduced": 2, "attempts": 2, "code": []},
+                         {"title": "Old finding", "severity": "minor", "steps": [], "evidence": [], "code": []}],
+            **overrides}
+
+
+def test_every_check_and_finding_is_an_accordion_with_its_cases_and_requirement():
+    """
+    Test that every check and finding is an accordion showing its cases, its requirement, and whether a blocked
+    or skipped check was tried at all, grouped by story, with no inline style or script.
+    """
+    __, body = qa_report.run_body(_qa_run_view(), "acme", ZoneInfo("UTC"))
+    assert body.count("<details") == 7 and body.count("<summary") == 7
+    assert 'id="f1"' in body and 'href="#f1"' in body
+    assert "US-2 · 2.3" in body and "The total shows &lt;the&gt; discount." in body
+    assert "Right password" in body and "Wrong password shows an error" in body and "2 of 2 cases ok" in body
+    assert "Nothing of this check was tried." in body and "The stand sends no mail." in body
+    assert "Tried 1 of 3 cases before it stopped." in body and "Out of time." in body
+    assert "The tester did not list the cases checked." in body
+    assert "No requirement cited" in body
+    assert body.index("US-1 Sign-in") < body.index("US-2 Cart") < body.index("US-3 Orders") < body.index("Other checks")
+    assert ' style="' not in body and "<script" not in body
+
+
+def test_the_report_filters_by_type_and_counts_each():
+    """
+    Test that the report offers a filter per type with its count, and none for a type with no items.
+    """
+    __, body = qa_report.run_body(_qa_run_view(), "acme", ZoneInfo("UTC"))
+    for kind, n in (("all", 7), ("finding", 2), ("ok", 2), ("problem", 1), ("blocked", 1), ("skipped", 1)):
+        assert f'id="qa-show-{kind}"' in body, kind
+        assert f'<label for="qa-show-{kind}"' in body and f"<b>{n}</b>" in body
+    only_ok = _qa_run_view(findings=[], tested=[{"what": "A", "result": "ok"}])
+    __, quiet = qa_report.run_body(only_ok, "acme", ZoneInfo("UTC"))
+    assert 'id="qa-show-ok"' in quiet and 'id="qa-show-finding"' not in quiet and 'id="qa-show-skipped"' not in quiet
+
+
+def test_screenshots_and_links_open_in_a_new_tab():
+    """
+    Test that screenshots, recordings and the finding's URL open in a new tab.
+    """
+    __, body = qa_report.run_body(_qa_run_view(), "acme", ZoneInfo("UTC"))
+    for href in ('href="media/abc.png"', 'href="media/abc.webm"', 'href="https://staging.example.com/cart"',
+                 'href="#f1"'):
+        i = body.index(href)
+        tag = body[body.rindex("<a", 0, i):body.index(">", i)]
+        assert 'target="_blank"' in tag and 'rel="noopener"' in tag, href
+
+
+def test_a_report_without_the_new_fields_still_renders():
+    """
+    Test that a result.json written before the new fields still renders as accordions.
+    """
+    view = {"n": 1, "outcome": "partial", "source": "command", "repos": [],
+            "tested": [{"what": "A", "result": "ok", "note": ""}, {"what": "B", "result": "skipped", "note": ""}],
+            "findings": []}
+    __, body = qa_report.run_body(view, "acme", ZoneInfo("UTC"))
+    assert body.count("<details") == 2 and "Other checks" not in body and "None reported." in body
+
+
+def test_a_check_without_its_cases_says_so_whatever_its_result():
+    """
+    Test that a check whose cases were not listed says so, also when blocked, while an empty list on a blocked
+    check says nothing was tried.
+    """
+    def body_of(check: dict) -> str:
+        return qa_report.run_body(_qa_run_view(tested=[check], findings=[]), "acme", ZoneInfo("UTC"))[1]
+    for result in ("ok", "blocked", "skipped"):
+        body = body_of({"what": "A", "result": result, "cases": None})
+        assert "The tester did not list the cases checked." in body and "Nothing of this check" not in body
+    body = body_of({"what": "A", "result": "blocked", "cases": []})
+    assert "Nothing of this check was tried." in body and "did not list" not in body
+
+
+def _css_rules(style: str) -> list[tuple[list[str], dict[str, str]]]:
+    """
+    The stylesheet's rules as (selectors, declarations), @media blocks flattened.
+    """
+    rules = []
+    for block in re.sub(r"@media[^{]*\{", "", style).split("}"):
+        if "{" not in block:
+            continue
+        head, body = block.rsplit("{", 1)
+        selectors = [s.strip() for s in head.split(",") if s.strip()]
+        declarations = dict((k.strip(), v.strip()) for k, __, v in
+                            (d.partition(":") for d in body.split(";") if ":" in d))
+        rules.append((selectors, declarations))
+    return rules
+
+
+def _declared(style: str, selector: str) -> dict[str, str]:
+    return {k: v for selectors, declarations in _css_rules(style) if selector in selectors
+            for k, v in declarations.items()}
+
+
+def test_the_filter_rules_cover_every_kind():
+    """
+    Test that the stylesheet lights the label of every filter kind and hides what each does not show, and that a
+    check's title sets its own colour, so another page's rules for details do not colour it.
+    """
+    style = qa_report.STYLE
+    for kind, __ in qa_report.FILTERS:
+        assert _declared(style, f'#qa-show-{kind}:checked ~ .qa-filter label[for="qa-show-{kind}"]').get("color")
+        hidden = (f"#qa-show-{kind}:checked ~ .qa-checks" if kind == "finding"
+                  else f"#qa-show-{kind}:checked ~ .qa-checks .qa-item:not(.{kind})")
+        assert _declared(style, hidden).get("display") == "none", kind
+    assert "color" in _declared(style, ".qa-item > summary")
+
+
+def test_notes_are_listed_with_what_was_left_out():
+    """
+    Test that the notes on a report are shown under what was left out of it.
+    """
+    __, body = qa_report.run_body(_qa_run_view(notes=["the check 'A' names finding 5"]), "acme", ZoneInfo("UTC"))
+    assert "Left out of this report" in body and "the check &#x27;A&#x27; names finding 5" in body
+
+
+def test_the_brief_and_the_review_ask_for_cases_and_the_requirement(w):
+    """
+    Test that the brief asks for groups, cases and the requirement, and that the closing review does not fail a
+    report for lacking them alone.
+    """
+    from arceus_runner.qa import REPORT_CRITERIA
+    queue(w)
+    text = dispatches(w)[0]["argv"][-1]
+    assert "`cases`" in text and "`spec`" in text and "`group`" in text
+    assert "`cases`" in REPORT_CRITERIA and "`spec`" in REPORT_CRITERIA
+    assert "their absence alone is not grounds for FAIL" in " ".join(REPORT_CRITERIA.split())

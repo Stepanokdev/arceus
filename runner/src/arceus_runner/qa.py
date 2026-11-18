@@ -82,7 +82,9 @@ all the parts. Judge the report by these points, and only these:
    picture of the tester's own words (a summary or a narrated result written onto a page) shows nothing of the
    platform and is no evidence; a raw request and response shown exactly as they went and came back is.
 3. The summary and the conclusions claim no more than the checks show: nothing is called working that was not
-   checked, and a check that could not be done or was skipped is listed as such, never as passed.
+   checked, and a check that could not be done or was skipped is listed as such, never as passed. A check's
+   `cases` and the requirement a check or finding cites (`spec`) help the reader; their absence alone is not
+   grounds for FAIL.
 4. The numbers agree: what the summary counts matches the checks and findings listed.
 5. A suspected cause in the code is put as a suspicion with its file and line. A finding with no cause found is
    not grounds for FAIL.
@@ -97,9 +99,19 @@ SCHEMA_EXAMPLE = """\
 {"summary": "Checked sign-in, the catalogue, the cart and checkout as a customer and as an admin. Checkout fails
              with a discount code; everything else worked.",
  "blocked": "",
- "tested": [{"what": "Sign-in as the customer account", "result": "ok", "note": ""},
-            {"what": "Checkout with a discount code", "result": "problem", "note": "see the first finding"}],
+ "tested": [{"what": "Sign-in as the customer account", "result": "ok", "note": "", "group": "US-1 Sign-in",
+             "spec": {"story": "US-1", "point": "1.1", "text": "A customer signs in with e-mail and password."},
+             "cases": [{"what": "Right password: the dashboard opens", "result": "ok", "note": ""},
+                       {"what": "Wrong password: an error under the field", "result": "ok", "note": ""}]},
+            {"what": "Checkout with a discount code", "result": "problem", "note": "", "group": "US-3 Checkout",
+             "spec": {"story": "US-3", "point": "3.2", "text": "The discount code applies at checkout."},
+             "cases": [{"what": "Pay with TEST10", "result": "problem", "note": "blank page"}], "finding": 1},
+            {"what": "Password reset e-mail", "result": "blocked", "note": "the stand sends no e-mail",
+             "group": "US-1 Sign-in", "spec": {"story": "US-1", "point": "1.4", "text": "A reset link is mailed."},
+             "cases": [{"what": "Request the reset: the e-mail sent page opens", "result": "ok", "note": ""},
+                       {"what": "Open the link from the e-mail", "result": "blocked", "note": "no e-mail"}]}],
  "findings": [{"title": "Checkout with a discount code shows a blank page",
+               "spec": {"story": "US-3", "point": "3.2", "text": "The discount code applies at checkout."},
                "severity": "major",
                "url": "https://staging.example.com/checkout",
                "steps": ["Sign in as the customer account", "Add any item to the cart", "Enter the code TEST10",
@@ -193,6 +205,47 @@ def report_parts(folder: Path) -> list[str]:
     return names
 
 
+def _spec(raw: object) -> dict | None:
+    """
+    The requirement a check or finding is about, as the instructions number and word it: its story, its point
+    and its text. None when the agent named none of them.
+    """
+    if not isinstance(raw, dict):
+        return None
+    spec = {"story": clean_text(raw.get("story"), 100), "point": clean_text(raw.get("point"), 100),
+            "text": clean_text(raw.get("text"), 1000)}
+    return spec if any(spec.values()) else None
+
+
+def _entry(raw: object, what_max: int, note_max: int) -> dict | None:
+    """
+    A check or a case: what it was, its result (one the runner does not know is "skipped") and its note. None
+    when it has no readable `what`.
+    """
+    what = clean_text(raw.get("what"), what_max) if isinstance(raw, dict) else ""
+    if not what:
+        return None
+    result = raw.get("result") if raw.get("result") in RESULTS else "skipped"
+    return {"what": what, "result": result, "note": clean_text(raw.get("note"), note_max)}
+
+
+def _cases(raw: object, check: str, notes: list[str]) -> list[dict] | None:
+    """
+    What a check was made of, each case with its own result: those with a readable `what`. None when the agent
+    did not list them, as against an empty list, which says none was tried. A case left out is said in `notes`.
+    """
+    if not isinstance(raw, list):
+        return None
+    cases = []
+    for case in raw:
+        entry = _entry(case, 300, 300)
+        if entry is None:
+            notes.append(f"a case of the check '{check}' has no readable `what`")
+        else:
+            cases.append(entry)
+    return cases
+
+
 def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list[str]]:
     path = folder / FINDINGS
     if folder.is_symlink() or not path.is_file() or path.is_symlink():
@@ -203,6 +256,7 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
         return {}, [f"the findings file is {size // 1024} KB, more than the {limits.report_bytes // 1024} KB a run "
                     "keeps (qa.max_report_mb), so none of it is shown"]
     problems: list[str] = []
+    notes: list[str] = []
     parts = []
     for name in names:
         try:
@@ -241,12 +295,13 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
                 problems.append(f"{FINDINGS} {said} {label}, the report has {actual[key]}")
     tested = []
     for t in raw_tested:
-        what = clean_text(t.get("what"), 300) if isinstance(t, dict) else ""
-        if not what:
+        entry = _entry(t, 300, 600)
+        if entry is None:
             problems.append("an entry of `tested` has no readable `what`")
             continue
-        result = t.get("result") if t.get("result") in RESULTS else "skipped"
-        tested.append({"what": what, "result": result, "note": clean_text(t.get("note"), 600)})
+        tested.append({**entry, "group": clean_text(t.get("group"), 200), "spec": _spec(t.get("spec")),
+                       "cases": _cases(t.get("cases"), entry["what"], notes),
+                       "finding": count(t.get("finding")) or None})
     if len(tested) > limits.checks:
         dropped = [t["what"] for t in tested[limits.checks:]]
         problems.append(f"`tested` lists {len(tested)} checks; a run keeps {limits.checks} (qa.max_checks), so "
@@ -255,6 +310,7 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
     evidence = _Evidence(folder, dest, limits)
     findings = []
     raw = raw_findings
+    number_of: dict[int, int] = {}  # the agent's numbering, across all parts, to the report's
     if any(p.get("findings") is not None and not isinstance(p.get("findings"), list) for p in parts):
         problems.append("`findings` is not a list, so what the agent found there is not known")
     for i, f in enumerate(raw[:limits.findings], 1):
@@ -283,6 +339,7 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
         url = clean_text(f.get("url"), 500)
         findings.append({
             "title": title,
+            "spec": _spec(f.get("spec")),
             "severity": f.get("severity") if f.get("severity") in SEVERITIES else "major",
             "url": url if url.startswith(("http://", "https://")) else "",
             "steps": steps,
@@ -295,12 +352,22 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
             "cause": clean_text(f.get("cause"), 2000),
             "code": code,
         })
+        number_of[i] = len(findings)
     if len(raw) > limits.findings:
         dropped = [clean_text(f.get("title"), 200) if isinstance(f, dict) else "" for f in raw[limits.findings:]]
         problems.append(f"the report has {len(raw)} findings; a run keeps {limits.findings} (qa.max_findings), so "
                         f"{len(dropped)} are left out: {_left_out([t or '(no title)' for t in dropped])}")
+    for check in tested:
+        named, what, result = check["finding"], check["what"], check["result"]
+        check["finding"] = number_of.get(named) if named and result == "problem" else None
+        if named and result != "problem":
+            notes.append(f"the check '{what}' is marked {result} but names finding {named}, so the link is not shown")
+        elif named and check["finding"] is None:
+            notes.append(f"the check '{what}' names finding {named}, but finding {named} is not in the report, "
+                         "so the link is not shown")
     return {"summary": clean_text(data.get("summary"), 1500), "blocked": clean_text(data.get("blocked"), 1500),
-            "tested": tested, "findings": findings}, list(dict.fromkeys(problems))
+            "tested": tested, "findings": findings, "notes": list(dict.fromkeys(notes))}, \
+        list(dict.fromkeys(problems))
 
 
 class _Evidence:
@@ -361,7 +428,7 @@ def outcome_of(found: dict, problems: list[str], fatal: list[str], stopped: bool
 
     "passed" only for a run that finished, found nothing, read whole, and checked at least one thing that worked
     with nothing it could not check or skipped; a run that checked some and could not check or skipped others is
-    "partial". What could not be checked, what was skipped, a check marked as a problem with no finding to say what,
+    "partial". What could not be checked, what was skipped, a check or a case marked as a problem with no finding to say what,
     or a report the runner could not read whole is never "No problems found", and neither is a report that did not
     pass its closing review (`engine_disputed`: what it found is kept, the objections are shown beside it). A disputed
     report that names no check that was done, or that could not be read whole, did not finish, findings or not."""
@@ -385,6 +452,8 @@ def outcome_of(found: dict, problems: list[str], fatal: list[str], stopped: bool
         return "unfinished", ["the agent did not say what it tested"]
     if "problem" in results:
         return "unfinished", ["a check is marked as a problem, but no finding says what the problem is"]
+    if any(case["result"] == "problem" for check in found.get("tested") or [] for case in check.get("cases") or []):
+        return "unfinished", ["a case of a check is marked as a problem, but no finding says what the problem is"]
     if problems:
         return "unfinished", ["part of the agent's report could not be read, so it may have found more than is shown"]
     if "ok" not in results:
@@ -495,8 +564,8 @@ class QaAgent(WorkspaceRun):
         link_code([c for f in result.get("findings") or [] for c in f.get("code") or []],
                   json.loads(run.snapshot or "{}"), self.d.host)
         return {**super().view(run, finished), "scenario": scenario_name(self.store, run),
-                **{k: result.get(k) for k in ("summary", "blocked", "tested", "findings", "engine_disputed",
-                                          "engine_review")}}
+                **{k: result.get(k) for k in ("summary", "blocked", "tested", "findings", "notes",
+                                          "engine_disputed", "engine_review")}}
 
     def _render(self, view: dict) -> str:
         return qa_report.render_run(view, self.cfg.project, self.cfg.schedule.tz)
@@ -596,7 +665,18 @@ class QaAgent(WorkspaceRun):
                   "and what you found. The details belong in `tested` and `findings`.",
                   "- `blocked`: empty, or why you could not test at all.",
                   "- `tested`: each thing you checked, with `result` \"ok\", \"problem\", \"blocked\" or \"skipped\" "
-                  "and a `note` where it helps.",
+                  "and a `note` where it helps. `group` is the `## ` heading of its line in your plan (a user story, "
+                  "a feature, a screen). `cases` is what you actually did for it, one entry per case with its own "
+                  "`result`: the team reads them to know what \"ok\" covers. A check and its cases fit in one part; "
+                  "split a check that needs more into several, by point for one. A \"blocked\" or "
+                  "\"skipped\" check lists the cases you tried before it stopped (an empty list, if you tried none) "
+                  "and says why in `note`. A \"problem\" check names its finding by number in `finding`: its place "
+                  "in `findings`, counted across all parts (1 for the first); other checks name none.",
+                  "- `spec`, on every check and every finding: the requirement it is about, as the instructions "
+                  "give it. `story` and `point` are their numbers as the instructions number them (\"US-3\", "
+                  "\"3.2\"), `text` the requirement in the instructions' own words. When the instructions number "
+                  "nothing, leave `story` and `point` empty and quote the sentence; when they do not state it at "
+                  "all, say in `text` that it is what plain sense expects.",
                   f"- The report keeps at most {self.c.max_checks} entries of `tested`, {self.c.max_findings} "
                   f"findings and {self.c.max_files} screenshots and recordings; whatever goes past is left out, "
                   "and the report names it. Keep one entry per check all the same, never several checks in one "

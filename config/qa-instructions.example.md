@@ -9,7 +9,9 @@ The shape is yours; the agent reads plain prose as well as lists. What a run nee
 - How to get in: the test accounts by role, with their passwords. This file is next to secrets.env and readable
   by the runner's user only; use accounts made for testing, never a real person's.
 - What to test, in the order you want it tested, and what you expect to see. The agent tests what you list; a
-  line like "then look around the rest of the site" lets it go further.
+  line like "then look around the rest of the site" lets it go further. Number the stories and their points
+  (US-1, 1.1, 1.2, ...): the report cites the number and the text of the requirement each check and problem is
+  about.
 - What it must not do: real payments, e-mails to real people, deleting shared data. Say how to clean up what it
   creates, if it should.
 - Anything a tester would ask on the first day: a known bug to ignore, a page that is slow on purpose, the test
