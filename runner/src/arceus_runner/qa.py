@@ -113,6 +113,7 @@ SCHEMA_EXAMPLE = """\
  "findings": [{"title": "Checkout with a discount code shows a blank page",
                "spec": {"story": "US-3", "point": "3.2", "text": "The discount code applies at checkout."},
                "severity": "major",
+               "type": "ac",
                "url": "https://staging.example.com/checkout",
                "steps": ["Sign in as the customer account", "Add any item to the cart", "Enter the code TEST10",
                          "Press Pay"],
@@ -341,6 +342,7 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
             "title": title,
             "spec": _spec(f.get("spec")),
             "severity": f.get("severity") if f.get("severity") in SEVERITIES else "major",
+            "type": qa_report.type_of(f),
             "url": url if url.startswith(("http://", "https://")) else "",
             "steps": steps,
             "failed_step": failed if failed and failed <= len(steps) else None,
@@ -684,7 +686,12 @@ class QaAgent(WorkspaceRun):
                   "also past that limit and also one you did not get to: that one is \"skipped\". The runner "
                   "counts what does not fit; never leave a check out of `tested`, nor tell of it only in `summary`.",
                   "- `findings`: one per problem. `severity` is \"critical\" (a main path is broken or data is at "
-                  "risk), \"major\" (a feature does not work) or \"minor\" (cosmetic, a workaround exists). `steps` "
+                  "risk), \"major\" (a feature does not work) or \"minor\" (cosmetic, a workaround exists). "
+                  f"`type` is the main kind of problem, one of: \"{qa_report.TYPE_AC}\" (breaks an acceptance "
+                  f"criterion or a stated requirement), \"{qa_report.TYPE_SECURITY}\" (access control, data "
+                  f"exposure, injection, sign-in), \"{qa_report.TYPE_UI}\" (layout, visuals, usability, "
+                  f"accessibility, texts), \"{qa_report.TYPE_PERFORMANCE}\" (slow pages, timeouts) or "
+                  f"\"{qa_report.TYPE_OTHER}\" (anything else). `steps` "
                   "start from a state anyone can reach (a URL, an account); `failed_step` is the step where it goes "
                   "wrong. `cause` and `code` are your suspicion from the code; leave them empty when you found none.",
                   "",
