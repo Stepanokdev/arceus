@@ -179,16 +179,16 @@ class GitLabReview(GitLabWriter):
 
     def notes(self, project_id: int, iid: int, mr_url: str) -> list[Note]:
         """Every note of every discussion, so a late reply in an old thread is seen too."""
-        out = []
-        for disc in self.paged(f"/api/v4/projects/{project_id}/merge_requests/{iid}/discussions"):
-            for n in disc.get("notes") or []:
-                pos = n.get("position") or {}
-                out.append(Note(
-                    id=n["id"], discussion_id=disc["id"], author=(n.get("author") or {}).get("username") or "",
-                    body=n.get("body") or "", system=bool(n.get("system")), created_at=n.get("created_at") or "",
-                    path=pos.get("new_path") or pos.get("old_path"), line=pos.get("new_line") or pos.get("old_line"),
-                    url=f"{mr_url}#note_{n['id']}", commit=pos.get("head_sha")))
-        return out
+        return [n for disc in self.paged(f"/api/v4/projects/{project_id}/merge_requests/{iid}/discussions")
+                for n in _thread_notes(disc, mr_url)]
+
+    def thread(self, project_id: int, iid: int, mr_url: str, discussion_id: str) -> list[Note] | None:
+        """The notes of one discussion, asked for by its id; None on a 404, which alone does not prove it deleted."""
+        try:
+            disc = self.c.get_json(f"/api/v4/projects/{project_id}/merge_requests/{iid}/discussions/{discussion_id}")
+        except NotFound:
+            return None
+        return _thread_notes(disc, mr_url)
 
     def failed_jobs(self, project_id: int, pipeline_id: int) -> list[FailedJob]:
         # Retried attempts are left out of this listing by GitLab: only each job's latest run is here.
@@ -358,6 +358,9 @@ class GitLabHost:
 
     def job_log_tail(self, repo_id: Id, job_id: Id, limit: int) -> str:
         return self.api.job_trace_tail(repo_id, job_id, limit)
+
+    def thread(self, repo_id: Id, iid: Id, mr_url: str, discussion_id: str) -> list[Note] | None:
+        return self.api.thread(repo_id, iid, mr_url, discussion_id)
 
     def reply(self, repo_id: Id, iid: Id, discussion_id: str, body: str) -> None:
         self.api.reply(repo_id, iid, discussion_id, body)
@@ -540,3 +543,15 @@ def _build(cfg: GitLabConfig, token: str, http: HttpConfig, transport=None, appr
 
 
 CODE_HOST = CodeHostType(config=GitLabConfig, build=_build)
+
+
+def _thread_notes(disc: dict, mr_url: str) -> list[Note]:
+    out = []
+    for n in disc.get("notes") or []:
+        pos = n.get("position") or {}
+        out.append(Note(
+            id=n["id"], discussion_id=disc["id"], author=(n.get("author") or {}).get("username") or "",
+            body=n.get("body") or "", system=bool(n.get("system")), created_at=n.get("created_at") or "",
+            path=pos.get("new_path") or pos.get("old_path"), line=pos.get("new_line") or pos.get("old_line"),
+            url=f"{mr_url}#note_{n['id']}", commit=pos.get("head_sha")))
+    return out

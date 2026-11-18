@@ -153,6 +153,7 @@ class ReviewLoop:
         self.store: ReviewStore = delivery.store
         self.host: CodeHost = delivery.host
         self.events = delivery.events
+        self._waiting: set[str] = set()  # replies whose thread was not found on the last look (reply_waits once)
 
     # -- watching -------------------------------------------------------------------------------
 
@@ -683,21 +684,41 @@ class ReviewLoop:
             payload = {"signal": s.id, "repo": s.repo, "discussion": s.discussion_id, "body": body}
             if not act:
                 self.store.action_intent(key, task.task_id, "reply", json.dumps(payload))
-            self.retry_reply(task, key, payload)
+            if not self.retry_reply(task, key, payload):
+                return  # its thread is not to be found now: the reply stays journaled, retry_pending tries it again
         self.store.mark_replied(s.id)
 
-    def retry_reply(self, task: Task, key: str, payload: dict) -> None:
-        """Post a thread reply unless it is already there: the marker survives a crash after the post."""
+    def retry_reply(self, task: Task, key: str, payload: dict) -> bool:
+        """Post a thread reply unless it is already there: the marker survives a crash after the post.
+
+        True once the reply is posted or found. False while its thread cannot be found, in the listing or by its id:
+        nothing is posted then, since a reply posted before a crash could not be checked for, and the reply stays
+        journaled for retry_pending while the task goes on. It is never dropped: a 404 does not tell a deleted thread
+        from one the bot may not see, and no answer of the host proves a deletion. Whatever people ask again in a
+        new thread is a new signal."""
         mr = {m.repo: m for m in self.store.task_mrs(task.task_id)}.get(payload["repo"])
         if not mr:
             self.store.action_done(key)
-            return
+            return True
         marker = f"<!-- arceus:{payload['signal']} -->"
-        if not any(marker in n.body and n.author == self.cfg.code_host.bot_user
-                   for n in self.host.notes(mr.project_id, mr.iid, mr.url) if n.discussion_id == payload["discussion"]):
+        thread = [n for n in self.host.notes(mr.project_id, mr.iid, mr.url) if n.discussion_id == payload["discussion"]]
+        by_id = getattr(self.host, "thread", None)
+        if not thread and by_id:
+            thread = by_id(mr.project_id, mr.iid, mr.url, payload["discussion"]) or []
+            if not thread:
+                if key not in self._waiting:
+                    self._waiting.add(key)
+                    self.events.emit("reply_waits", task_id=task.task_id, repo=payload["repo"],
+                                     signal=payload["signal"], discussion=payload["discussion"],
+                                     reason="thread not found")
+                return False
+        self._waiting.discard(key)
+        # A host that cannot look a thread up by its id gets the reply as before: posting is all it can do.
+        if not any(marker in n.body and n.author == self.cfg.code_host.bot_user for n in thread):
             self.host.reply(mr.project_id, mr.iid, payload["discussion"], f"{payload['body']}\n\n{marker}")
         self.store.action_done(key)
         self.store.mark_replied(payload["signal"])
+        return True
 
     def note_moved(self, task: Task, repo: str, remote: str, sha: str, published: str | None = None,
                    rewritten: bool = False) -> None:

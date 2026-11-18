@@ -309,6 +309,10 @@ class CodeHost(Protocol):
       what the reviewer ran itself counts.
     - Conflict detection: conflict=None; the agent learns of a conflict from people instead.
     - Threads: reply() posting a plain comment on the merge request; it carries the same marker.
+    - One thread by its id: `thread(repo_id, iid, mr_url, discussion_id) -> list[Note] | None`, None when the host
+      does not know that id. Not declared below on purpose: an adapter inheriting this class must not get a stub
+      that answers None. Without it a reply is posted even to a thread missing from the listing, and a reply to a
+      thread people deleted is retried until it goes through.
     - Uploads: supports_uploads False; screenshots go to the ticket only.
     - Approval: supports_approval False (no approver account, or a host without approvals); the review
       agent then says what it found in a note and approves nothing.

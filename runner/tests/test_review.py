@@ -750,6 +750,173 @@ def test_a_crash_after_the_thread_reply_does_not_reply_twice(w, monkeypatch):
     assert len(bot) == 1 and w.store.task("ACME-1").state == "code_review"
 
 
+def test_a_thread_deleted_during_the_round_does_not_hold_the_task_in_publishing(w):
+    published(w)
+    gone = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.gl.note(1, "reviewer", "@acme-agent-bot Use a constant", discussion=gone)  # two signals in the deleted thread
+    kept = w.gl.note(1, "reviewer", "@acme-agent-bot Add a test")
+    w.tick()
+    later(w)
+    # The reviewer deletes the first thread while the agent works, and asks again in a new one.
+    w.gl.discussions[1] = [d for d in w.gl.discussions[1] if d["id"] != gone]
+    again = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it, and keep the old name as an alias")
+    fix_and_settle(w)
+    assert w.store.task("ACME-1").state == "code_review"     # the missing thread no longer holds the task
+    assert len(bot_replies(w, kept)) == 1                     # the thread after the deleted one is still answered
+    assert not w.events_named("reconcile_failed")
+    [first, _] = [s for s in w.store.signals_of_kind("ACME-1", "review") if s.discussion_id == gone]
+    key = f"ACME-1:reply:{first.id}"
+    later(w)
+    assert "keep the old name as an alias" in sends(w)[-1]["argv"][-1]  # the new thread is the next round
+    assert len(bot_replies(w, again)) == 0
+    w.now += timedelta(hours=6)
+    w.tick()
+    assert w.store.action(key)[0] == "intent"                  # never dropped: a 404 proves no deletion
+    assert len(w.events_named("reply_waits")) == 1             # said once, not on every tick
+
+
+def test_a_live_thread_the_listing_left_out_still_gets_its_reply_once(w, monkeypatch):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.tick()
+    later(w)
+    w.gl.unlisted.add(d)  # on a page the listing did not get: present, only not listed
+    real_done = w.store.action_done
+
+    def die_on_reply(key, result=None):
+        if ":reply:" in key:
+            raise RuntimeError("killed right after the reply was posted")
+        return real_done(key, result)
+
+    monkeypatch.setattr(w.store, "action_done", die_on_reply)
+    w.agent_commits("fix.txt")
+    w.settle("ACME-1", "waiting_review", outcome={"summary": "renamed"})
+    with pytest.raises(RuntimeError, match="killed"):
+        w.tick()
+    assert len(bot_replies(w, d)) == 1                         # asked for by its id, it was found and answered
+    monkeypatch.setattr(w.store, "action_done", real_done)
+    w.restart()
+    w.clock.advance(3600)
+    w.tick()
+    assert len(bot_replies(w, d)) == 1                         # the retry finds its marker in it: no second reply
+    assert w.store.task("ACME-1").state == "code_review"
+
+
+def test_a_thread_unreachable_for_a_while_gets_its_reply_once_it_is_back(w):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.tick()
+    later(w)
+    w.gl.unlisted.add(d)  # neither listed nor found by its id: a plain 404, as GitLab also answers a refusal
+    w.gl.unfound.add(d)
+    fix_and_settle(w)
+    assert len(bot_replies(w, d)) == 0                         # nothing posted while its fate is unknown
+    assert w.store.task("ACME-1").state == "code_review"
+    w.gl.unlisted.clear()
+    w.gl.unfound.clear()                                       # the access is back on the next tick
+    later(w)
+    assert len(bot_replies(w, d)) == 1
+    assert all(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
+
+
+def test_a_thread_unreachable_for_hours_still_gets_its_reply_once_it_is_back(w):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.tick()
+    later(w)
+    w.gl.unlisted.add(d)
+    w.gl.unfound.add(d)
+    fix_and_settle(w)
+    for _ in range(3):                                         # well past any wait a deletion could be guessed from
+        w.now += timedelta(minutes=31)
+        w.tick()
+    assert len(bot_replies(w, d)) == 0 and w.store.task("ACME-1").state == "code_review"
+    w.gl.unlisted.clear()
+    w.gl.unfound.clear()
+    later(w)
+    later(w)
+    assert len(bot_replies(w, d)) == 1
+    [signal] = w.store.signals_of_kind("ACME-1", "review")
+    assert w.store.action(f"ACME-1:reply:{signal.id}")[0] == "done" and signal.replied
+
+
+def test_a_reply_posted_before_a_crash_is_not_posted_again_while_its_thread_is_unreachable(w, monkeypatch):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.tick()
+    later(w)
+    w.gl.unlisted.add(d)  # found by its id only, and answered there
+    real_done = w.store.action_done
+
+    def die_on_reply(key, result=None):
+        if ":reply:" in key:
+            raise RuntimeError("killed right after the reply was posted")
+        return real_done(key, result)
+
+    monkeypatch.setattr(w.store, "action_done", die_on_reply)
+    w.agent_commits("fix.txt")
+    w.settle("ACME-1", "waiting_review", outcome={"summary": "renamed"})
+    with pytest.raises(RuntimeError, match="killed"):
+        w.tick()
+    assert len(bot_replies(w, d)) == 1
+    monkeypatch.setattr(w.store, "action_done", real_done)
+    w.restart()
+    w.gl.unfound.add(d)                                        # now a 404 by its id too: the marker cannot be seen
+    w.clock.advance(3600)
+    w.tick()
+    later(w)
+    assert len(bot_replies(w, d)) == 1                         # no second POST while the first one's fate is unknown
+    w.gl.unfound.clear()
+    later(w)
+    assert len(bot_replies(w, d)) == 1                         # back in sight, its marker settles it
+    [signal] = w.store.signals_of_kind("ACME-1", "review")
+    assert w.store.action(f"ACME-1:reply:{signal.id}")[0] == "done" and signal.replied
+    assert w.store.task("ACME-1").state == "code_review"
+
+
+def test_a_host_that_cannot_look_a_thread_up_by_id_keeps_replying_as_before(w, monkeypatch):
+    from arceus_runner.gitlab import GitLabHost
+    from arceus_runner.integrations import CodeHost
+
+    class Inherits(CodeHost):  # an adapter that leaves the optional lookup out gets no stub of it
+        pass
+
+    assert getattr(Inherits(), "thread", None) is None
+    monkeypatch.delattr(GitLabHost, "thread")
+    published(w)
+    live = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    deleted = w.gl.note(1, "reviewer", "@acme-agent-bot Add a test")
+    w.tick()
+    later(w)
+    w.gl.unlisted.add(live)
+    w.gl.discussions[1] = [x for x in w.gl.discussions[1] if x["id"] != deleted]
+    fix_and_settle(w)
+    assert len(bot_replies(w, live)) == 1                      # not in the listing: the reply is still posted
+    assert w.store.task("ACME-1").state == "publishing" and w.events_named("reconcile_failed")
+
+
+def test_a_reply_the_host_fails_for_now_is_posted_on_a_later_tick(w, monkeypatch):
+    from arceus_runner.gitlab import GitLabReview
+    from arceus_runner.http import TransientError
+
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.tick()
+    later(w)
+    real = GitLabReview.reply
+
+    def down(*a, **kw):
+        raise TransientError("gitlab", "502 Bad Gateway", 502)
+
+    monkeypatch.setattr(GitLabReview, "reply", down)
+    fix_and_settle(w)
+    assert w.store.task("ACME-1").state == "publishing"
+    monkeypatch.setattr(GitLabReview, "reply", real)
+    later(w)
+    assert w.store.task("ACME-1").state == "code_review"
+    assert len(bot_replies(w, d)) == 1
+
+
 def test_a_repair_waits_while_another_task_holds_the_workspace(w):
     published(w)
     w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
