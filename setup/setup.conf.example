@@ -6,8 +6,8 @@
 # and can read the runner's tokens.
 
 # Pinned tool versions. Change them here, re-run setup: the old version is replaced.
-CLAUDE_CODE_VERSION=2.1.325
-CODEX_VERSION=0.169.0
+CLAUDE_CODE_VERSION=2.1.327
+CODEX_VERSION=0.170.0
 CHROME_DEVTOOLS_MCP_VERSION=1.10.1   # must match Bulava's engine/supervisor/automation-mcp.json
 # Google Sheets, Docs and Drive for the agent, read-only (README, "Google documents"). Empty: no Google.
 WORKSPACE_MCP_VERSION=2.3.0
