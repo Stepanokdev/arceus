@@ -54,6 +54,8 @@ TRACE_CHARS = 2500
 NOTE_CHARS = 2000    # one note of a thread, as the agent sees it
 THREAD_CHARS = 8000  # one thread: its first note and the latest ones, the middle left out
 _OUR_MARKER = re.compile(r"\s*<!-- arceus:[^>]*-->")
+_LEGACY_SIGNAL = re.compile(r"note-(.+)-(\d+)")                          # _note_signal: project, note
+_MR_NOTE_LINK = re.compile(r"/merge_requests/(\d+)#note_(\d+)$")         # a GitLab note's link: MR, note
 
 
 def conflict_text(repo: str, target: str, default: str = "") -> str:
@@ -153,7 +155,7 @@ class ReviewLoop:
         self.store: ReviewStore = delivery.store
         self.host: CodeHost = delivery.host
         self.events = delivery.events
-        self._waiting: set[str] = set()  # replies whose thread was not found on the last look (reply_waits once)
+        self._waiting: dict[str, str] = {}  # reply key -> why it waits, said once per reason (reply_waits)
 
     # -- watching -------------------------------------------------------------------------------
 
@@ -632,17 +634,20 @@ class ReviewLoop:
         """One reply in each thread of the round: `body(answer or None, repo)` says what it is."""
         mrs = {m.repo: m for m in self.store.task_mrs(task.task_id)}
         answers = self._answers(task, batch)
-        answered: set[tuple[str, str]] = set()
+        delivered: dict[tuple[str, str], bool] = {}  # thread -> its one reply is there
         for s in self.store.signals(task.task_id, batch.id):
             if not s.discussion_id or s.repo not in mrs:
                 continue
             key = (s.repo, s.discussion_id)
-            if s.replied or key in answered:
-                answered.add(key)
-                self.store.mark_replied(s.id)  # two notes in one thread get one reply
+            if key in delivered:
+                if delivered[key]:
+                    self.store.mark_replied(s.id)  # two notes in one thread get one reply
+                continue  # a reply still pending answers them all once it goes out (retry_reply)
+            if s.replied:
+                delivered[key] = True
                 continue
-            answered.add(key)
-            self._reply_once(task, s, mrs[s.repo], replies.unattributed(body(answers.get(key), s.repo))[:8000])
+            delivered[key] = self._reply_once(task, s, mrs[s.repo],
+                                              replies.unattributed(body(answers.get(key), s.repo))[:8000])
 
     def after_publish(self, task: Task, published: dict[str, str]) -> None:
         """Answer in each thread of the last round: the agent's answer, and the commit if it changed code."""
@@ -677,7 +682,7 @@ class ReviewLoop:
         self.store.update_task(task.task_id, state="code_review", reason=None)
         self.events.emit("review_answered", task_id=task.task_id, changed=False)
 
-    def _reply_once(self, task: Task, s: Signal, mr, body: str) -> None:
+    def _reply_once(self, task: Task, s: Signal, mr, body: str) -> bool:
         key = f"{task.task_id}:reply:{s.id}"
         act = self.store.action(key)
         if not act or act[0] != "done":
@@ -687,8 +692,9 @@ class ReviewLoop:
             if not act:
                 self.store.action_intent(key, task.task_id, "reply", json.dumps(payload))
             if not self.retry_reply(task, key, json.loads(act[1]) if act and act[1] else payload):
-                return  # not delivered now: the reply stays journaled, retry_pending tries it again
+                return False  # not delivered now: the reply stays journaled, retry_pending tries it again
         self.store.mark_replied(s.id)
+        return True
 
     def retry_reply(self, task: Task, key: str, payload: dict) -> bool:
         """Post a thread reply unless it is already there: the marker survives a crash after the post.
@@ -699,9 +705,9 @@ class ReviewLoop:
         into a thread the runner cannot see, since a reply posted before a crash could not be checked for there. It is
         never dropped: a 404 does not tell a deleted thread from one the bot may not see, and no answer of the host
         proves a deletion. Other failures (5xx, timeouts) raise as before and are retried on the next tick."""
-        where = self._reply_mr(task, payload)
+        where = self._reply_mr(task, key, payload)
         if where is None:
-            return self._reply_waits(task, key, payload, "its merge request is no longer in the task")
+            return self._reply_waits(task, key, payload, "its merge request cannot be told from the journal or the signal")
         project_id, iid, url = where
         marker = f"<!-- arceus:{payload['signal']} -->"
         try:
@@ -716,22 +722,47 @@ class ReviewLoop:
                 self.host.reply(project_id, iid, payload["discussion"], f"{payload['body']}\n\n{marker}")
         except NotFound as e:
             return self._reply_waits(task, key, payload, str(e))
-        self._waiting.discard(key)
+        self._waiting.pop(key, None)
         self.store.action_done(key)
-        self.store.mark_replied(payload["signal"])
+        self._mark_thread_replied(task, payload)
         return True
 
-    def _reply_mr(self, task: Task, payload: dict) -> tuple | None:
-        """Where the reply goes: the merge request pinned in its journal entry; an entry written before pinning
-        names only the repository, and goes to that repository's merge request while the task still has one."""
+    def _mark_thread_replied(self, task: Task, payload: dict) -> None:
+        """The reply answers every note of its thread that came in the same round."""
+        self.store.mark_replied(payload["signal"])
+        s = self.store.signal(payload["signal"])
+        if s and s.batch_id:
+            for other in self.store.signals(task.task_id, s.batch_id):
+                if (other.repo, other.discussion_id) == (s.repo, s.discussion_id) and not other.replied:
+                    self.store.mark_replied(other.id)
+
+    def _reply_mr(self, task: Task, key: str, payload: dict) -> tuple | None:
+        """Where the reply goes: the merge request pinned in its journal entry. An entry written before pinning
+        is completed from its signal, whose last line is the note's own link, written by the runner: the task's
+        merge request at that link, or else the project of the signal id and the merge request number in the link.
+        None when neither tells it: the reply then waits rather than go to some other merge request."""
         if payload.get("project_id") is not None and payload.get("iid") is not None:
             return payload["project_id"], payload["iid"], payload.get("mr_url") or ""
-        mr = {m.repo: m for m in self.store.task_mrs(task.task_id)}.get(payload["repo"])
-        return (mr.project_id, mr.iid, mr.url) if mr else None
+        s = self.store.signal(payload["signal"])
+        link = s.body.rstrip().rsplit("\n", 1)[-1].strip() if s else ""
+        base = link.split("#", 1)[0]
+        found = None
+        if link.startswith("http") and "#" in link:
+            mr = next((m for m in self.store.task_mrs(task.task_id) if m.url == base), None)
+            if mr:
+                found = (mr.project_id, mr.iid, mr.url)
+            elif (m := _LEGACY_SIGNAL.fullmatch(payload["signal"])) and (n := _MR_NOTE_LINK.search(link)) \
+                    and n.group(2) == m.group(2):
+                project = int(m.group(1)) if m.group(1).isdigit() else m.group(1)
+                found = (project, int(n.group(1)), base)
+        if found:
+            payload.update(project_id=found[0], iid=found[1], mr_url=found[2])
+            self.store.action_payload(key, json.dumps(payload))
+        return found
 
     def _reply_waits(self, task: Task, key: str, payload: dict, reason: str) -> bool:
-        if key not in self._waiting:  # said once per wait, not on every tick
-            self._waiting.add(key)
+        if self._waiting.get(key) != reason:  # said when the reason changes, not on every tick
+            self._waiting[key] = reason
             self.events.emit("reply_waits", task_id=task.task_id, repo=payload["repo"], signal=payload["signal"],
                              discussion=payload["discussion"], reason=reason)
         return False

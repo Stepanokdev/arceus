@@ -480,7 +480,7 @@ def test_findings_for_commits_the_mr_has_moved_past_are_not_sent(w):
     w.gl.mrs[0].update(sha="f" * 40)                          # someone pushed while the review ran
     finish(w)
     [note] = review_notes(w)
-    assert "Nothing was sent to the agent (https://gl/clients/acme/mr/1 has new commits since the review)" in note
+    assert "Nothing was sent to the agent (https://gl/clients/acme/-/merge_requests/1 has new commits since the review)" in note
     later(w)
     later(w)
     assert sends(w) == []

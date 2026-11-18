@@ -1026,6 +1026,10 @@ class TaskStore(Store):
         ).fetchall()
         return [(r["idem_key"], r["task_id"], r["kind"], r["result"]) for r in rows]
 
+    def action_payload(self, idem_key: str, payload: str) -> None:
+        """Rewrite what an unfinished action needs to be redone (a journal entry completed with what it lacked)."""
+        self.conn.execute("UPDATE actions SET result = ? WHERE idem_key = ? AND status = 'intent'", (payload, idem_key))
+
     def action_done(self, idem_key: str, result: str | None = None) -> None:
         self.conn.execute(
             "UPDATE actions SET status = 'done', result = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"

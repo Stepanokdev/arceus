@@ -347,7 +347,7 @@ class FakeGitLab:
                 return json_response({"message": {"source_branch": ["does not exist"]}}, 400)
             body = json.loads(request.content)
             mr = {**body, "project_id": pid, "iid": len(self.mrs) + 1, "state": "opened",
-                  "web_url": f"https://gl/clients/acme/mr/{len(self.mrs) + 1}"}
+                  "web_url": f"https://gl/clients/acme/-/merge_requests/{len(self.mrs) + 1}"}
             self.mrs.append(mr)
             return json_response(mr, 201)
         return json_response({"message": f"unexpected {path}"}, 400)

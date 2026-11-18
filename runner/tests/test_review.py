@@ -951,6 +951,82 @@ def test_a_pending_reply_goes_to_the_merge_request_it_was_written_for_after_the_
     assert len(bot_replies(w, d)) == 1 and w.store.action(key)[0] == "done"
 
 
+def _journal_as_before_pinning(w, key):
+    """The reply's journal entry as the runner wrote it before it pinned the merge request: the repository only."""
+    data = json.loads(w.store.action(key)[1])
+    for k in ("project_id", "iid", "mr_url"):
+        data.pop(k)
+    w.store.action_payload(key, json.dumps(data))
+
+
+def _pending_reply(w):
+    """One review note answered while its post is refused: (thread, journal key)."""
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.tick()
+    later(w)
+    w.gl.refused_replies.add(d)
+    fix_and_settle(w)
+    [signal] = w.store.signals_of_kind("ACME-1", "review")
+    return d, f"ACME-1:reply:{signal.id}"
+
+
+def test_a_reply_journaled_before_pinning_goes_to_its_own_merge_request_after_the_task_drops_it(w):
+    d, key = _pending_reply(w)
+    _journal_as_before_pinning(w, key)
+    w.store.drop_mr("ACME-1", "acme-platform")
+    w.gl.refused_replies.clear()
+    later(w)
+    later(w)
+    assert len(bot_replies(w, d)) == 1
+    assert w.store.action(key)[0] == "done"
+
+
+def test_a_reply_journaled_before_pinning_skips_the_merge_request_that_replaced_its_own(w):
+    d, key = _pending_reply(w)
+    _journal_as_before_pinning(w, key)
+    [old] = w.store.task_mrs("ACME-1")
+    w.gl.mrs.append({**w.gl.mr(1), "iid": 2, "web_url": old.url.rsplit("/", 1)[0] + "/2"})
+    w.store.upsert_mr("ACME-1", old.repo, old.project_id, 2, old.url.rsplit("/", 1)[0] + "/2", old.published_sha)
+    later(w)                                                   # the original thread is still refused here
+    assert json.loads(w.store.action(key)[1])["iid"] == 1     # completed from the signal: the MR it was written for
+    w.gl.refused_replies.clear()
+    later(w)
+    later(w)
+    assert len(bot_replies(w, d)) == 1 and w.store.action(key)[0] == "done"
+    assert not w.gl.discussions.get(2)                         # nothing went to the new merge request
+
+
+def test_a_reply_whose_merge_request_cannot_be_told_waits_and_says_why(w):
+    d, key = _pending_reply(w)
+    _journal_as_before_pinning(w, key)
+    [signal] = w.store.signals_of_kind("ACME-1", "review")
+    w.store.conn.execute("UPDATE signals SET body = ? WHERE id = ?", ("reviewer: Rename it", signal.id))
+    w.store.drop_mr("ACME-1", "acme-platform")
+    w.gl.refused_replies.clear()
+    later(w)
+    later(w)
+    assert len(bot_replies(w, d)) == 0 and w.store.action(key)[0] == "intent"
+    assert any("cannot be told" in e["reason"] for e in w.events_named("reply_waits"))
+
+
+def test_notes_of_one_thread_stay_unanswered_until_its_one_reply_goes_out(w):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.gl.note(1, "reviewer", "@acme-agent-bot and the alias too", discussion=d)
+    w.tick()
+    later(w)
+    w.gl.refused_replies.add(d)
+    fix_and_settle(w)
+    assert w.store.task("ACME-1").state == "code_review"
+    assert not any(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
+    w.gl.refused_replies.clear()
+    later(w)
+    later(w)
+    assert len(bot_replies(w, d)) == 1
+    assert all(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
+
+
 def test_a_reply_the_host_fails_for_now_is_posted_on_a_later_tick(w, monkeypatch):
     from arceus_runner.gitlab import GitLabReview
     from arceus_runner.http import TransientError

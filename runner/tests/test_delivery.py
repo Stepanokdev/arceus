@@ -709,7 +709,7 @@ def test_mr_closed_by_a_person_after_a_crash_is_not_recreated(w):
     w.agent_commits()
     w.settle("ACME-1", "waiting_review")
     w.gl.mrs.append({"project_id": 0, "iid": 1, "state": "closed", "source_branch": "agent/ACME-1-fix-login-page",
-                     "web_url": "https://gl/clients/acme/mr/1"})
+                     "web_url": "https://gl/clients/acme/-/merge_requests/1"})
     w.tick()
     assert len(w.gl.mrs) == 1
     assert not [r for r in w.gl.requests if r.method == "POST" and r.url.path.endswith("/merge_requests")]
