@@ -814,6 +814,123 @@ class ConsoleConfig(Strict):
         return self
 
 
+_SLACK_CHANNEL = re.compile(r"^[CG][A-Z0-9]{2,}$")
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _channels(v: list[str]) -> list[str]:
+    bad = [c for c in v if not _SLACK_CHANNEL.match(c)]
+    if bad:
+        raise ValueError(f"Slack channel IDs look like C0123ABCD (channel details, at the bottom): {', '.join(bad)}")
+    return v
+
+
+def _emails(v: list[str]) -> list[str]:
+    bad = [e for e in v if not _EMAIL.match(e)]
+    if bad:
+        raise ValueError(f"expected e-mail addresses, got {', '.join(map(repr, bad))}")
+    out = [e.lower() for e in v]
+    if len(set(out)) != len(out):
+        raise ValueError("has duplicates")
+    return out
+
+
+class AssistantSlack(Strict):
+    """The assistant in Slack, over Socket Mode (the server opens the connection; nothing listens on the internet).
+    Its two tokens are SLACK_APP_TOKEN (xapp-…, connections:write) and SLACK_BOT_TOKEN (xoxb-…) in assistant.env."""
+    web_url: str = Field(default="", pattern=r"^(https?://\S+)?$")
+    read_channels: list[str] = []
+    internal_channels: list[str] = []
+    listen_channels: list[str] = []
+    partner_channels: list[str] = []
+    creator_channels: list[str] = []
+    creator_domain: str = Field(default="", pattern=r"^([a-z0-9-]+\.)+[a-z]{2,}$|^$")
+    history_days: int = Field(default=120, ge=1, le=3650)
+    call_names: list[str] = []
+
+    _check_channels = field_validator("read_channels", "internal_channels", "listen_channels", "partner_channels",
+                                      "creator_channels")(_channels)
+
+    @model_validator(mode="after")
+    def _creators(self) -> AssistantSlack:
+        if bool(self.creator_channels) != bool(self.creator_domain):
+            raise ValueError("creator_channels and creator_domain go together: members of those channels with an "
+                             "e-mail of that domain may have tickets made")
+        both = set(self.listen_channels) & set(self.partner_channels)
+        if both:
+            raise ValueError(f"a channel is either listened to or a partner's, not both: {', '.join(sorted(both))}")
+        return self
+
+
+class AssistantYouTrack(Strict):
+    """Where the tickets the assistant drafts are made: the tracker's own address (tracker.url), from the bot account
+    whose token is YOUTRACK_TOKEN in assistant.env. Without the token she still drafts them; nobody can make them."""
+    project: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
+    board: str = ""
+    queue_tag: str = ""
+    state_field: str = Field(default="State", min_length=1)
+    queued_state: str = Field(default="To Do", min_length=1)
+    type_field: str = ""
+    types: dict[Literal["bug", "feature", "research"], str] = {"bug": "Bug", "feature": "Feature",
+                                                                "research": "Task"}
+
+
+class AssistantTicketEngine(Strict):
+    """Tickets written and checked by the assistant's own Night Shift desk (assistant/deploy/ticket-engine)."""
+    bridge: str = Field(pattern=r"^\S+( \S+)*$")
+    timeout: Duration = timedelta(minutes=25)
+
+
+class AssistantConfig(Strict):
+    """The project's assistant (assistant/ beside the runner): a web chat behind the console at /assistant/ and,
+    with `slack`, a colleague in the project's Slack. It reads the code (a read-only mirror), the project's tickets
+    and channels, drafts tickets for the factory and tells how the factory works from this file.
+    Its own process (arceus-assistant@<run user>), set up by setup.sh's `assistant` phase. Its tokens are in
+    `secrets` (assistant.env), never here."""
+    enabled: bool = False
+    project: str = ""
+    name: str = Field(default="Assistant", min_length=1)
+    gender: Literal["f", "m"] = "f"
+    intro: str = ""
+    persona_file: ExpandedPath | None = None
+    knowledge_file: ExpandedPath | None = None
+    home: ExpandedPath = Field(default="~/assistant", validate_default=True)
+    secrets: ExpandedPath = Field(default="~/arceus/data/assistant.env", validate_default=True)
+    port: int = Field(default=8190, ge=1024, le=65535)
+    web: bool = True
+    allowed_users: list[str] = []
+    ticket_creators: list[str] = []
+    expert: str = Field(default="", pattern=r"^([^@\s]+@[^@\s]+\.[^@\s]+)?$")
+    expert_name: str = Field(default="the project's expert", min_length=2)
+    provider: Literal["claude", "codex"] = "claude"
+    auth: Literal["subscription", "api_key"] = "subscription"
+    key_owner: str = Field(default="", max_length=200)
+    model: str = Field(default="sonnet", pattern=MODEL_NAME)
+    codex_model: str = Field(default="gpt-6.1-terra", pattern=MODEL_NAME)
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
+    reply_timeout: Duration = timedelta(minutes=10)
+    voice_model: str = Field(default="medium", pattern=r"^[a-z0-9.-]*$")
+    claude_bin: str = Field(default="claude", min_length=1)
+    codex_bin: str = Field(default="codex", min_length=1)
+    youtrack: AssistantYouTrack | None = None
+    ticket_engine: AssistantTicketEngine | None = None
+    slack: AssistantSlack | None = None
+
+    _check_emails = field_validator("allowed_users", "ticket_creators")(_emails)
+
+    @field_validator("expert")
+    @classmethod
+    def _expert(cls, v: str) -> str:
+        return v.lower()
+
+    @model_validator(mode="after")
+    def _who(self) -> AssistantConfig:
+        if self.enabled and self.web and not self.allowed_users:
+            raise ValueError("allowed_users: name who may open the web chat (console e-mails), or set web: false; "
+                             "the console may show other projects' people too")
+        return self
+
+
 class MetricsConfig(Strict):
     enabled: bool = True
     address: str = "127.0.0.1"  # Prometheus scrapes it on the same machine; never open it outside
@@ -852,6 +969,7 @@ class Config(Strict):
     secops: SecOpsConfig = SecOpsConfig()
     cleanup: CleanupConfig = CleanupConfig()
     console: ConsoleConfig = ConsoleConfig()
+    assistant: AssistantConfig = AssistantConfig()
     metrics: MetricsConfig = MetricsConfig()
     paths: Paths = Paths()
 
@@ -873,6 +991,17 @@ class Config(Strict):
             raise ValueError(f"security.reviewers must not contain the bot itself ({self.tracker.bot_user})")
         if len(set(s.reviewers)) != len(s.reviewers):
             raise ValueError("security.reviewers has duplicates")
+        return self
+
+    @model_validator(mode="after")
+    def _assistant(self) -> Config:
+        a = self.assistant
+        if a.enabled and a.youtrack and self.tracker.type != "youtrack":
+            raise ValueError(f"assistant.youtrack: the assistant makes tickets in YouTrack only; this tracker is "
+                             f"{self.tracker.type}")
+        if a.secrets == self.paths.secrets:
+            raise ValueError("assistant.secrets must be a file of its own, not the runner's secrets.env: the runner "
+                             "and its agents must never get the assistant's keys")
         return self
 
     @model_validator(mode="after")
