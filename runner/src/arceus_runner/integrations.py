@@ -311,8 +311,8 @@ class CodeHost(Protocol):
     - Threads: reply() posting a plain comment on the merge request; it carries the same marker.
     - One thread by its id: `thread(repo_id, iid, mr_url, discussion_id) -> list[Note] | None`, None when the host
       does not know that id. Not declared below on purpose: an adapter inheriting this class must not get a stub
-      that answers None. Without it a reply is posted even to a thread missing from the listing, and a reply to a
-      thread people deleted is retried until it goes through.
+      that answers None. Without it a reply is posted even to a thread missing from the listing; a 404 to it leaves
+      the reply pending.
     - Uploads: supports_uploads False; screenshots go to the ticket only.
     - Approval: supports_approval False (no approver account, or a host without approvals); the review
       agent then says what it found in a note and approves nothing.

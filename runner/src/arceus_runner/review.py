@@ -681,44 +681,60 @@ class ReviewLoop:
         key = f"{task.task_id}:reply:{s.id}"
         act = self.store.action(key)
         if not act or act[0] != "done":
-            payload = {"signal": s.id, "repo": s.repo, "discussion": s.discussion_id, "body": body}
+            # The merge request is pinned in the journal: a later round may drop it from the task or open another.
+            payload = {"signal": s.id, "repo": s.repo, "discussion": s.discussion_id, "body": body,
+                       "project_id": mr.project_id, "iid": mr.iid, "mr_url": mr.url}
             if not act:
                 self.store.action_intent(key, task.task_id, "reply", json.dumps(payload))
-            if not self.retry_reply(task, key, payload):
-                return  # its thread is not to be found now: the reply stays journaled, retry_pending tries it again
+            if not self.retry_reply(task, key, json.loads(act[1]) if act and act[1] else payload):
+                return  # not delivered now: the reply stays journaled, retry_pending tries it again
         self.store.mark_replied(s.id)
 
     def retry_reply(self, task: Task, key: str, payload: dict) -> bool:
         """Post a thread reply unless it is already there: the marker survives a crash after the post.
 
-        True once the reply is posted or found. False while its thread cannot be found, in the listing or by its id:
-        nothing is posted then, since a reply posted before a crash could not be checked for, and the reply stays
-        journaled for retry_pending while the task goes on. It is never dropped: a 404 does not tell a deleted thread
-        from one the bot may not see, and no answer of the host proves a deletion. Whatever people ask again in a
-        new thread is a new signal."""
-        mr = {m.repo: m for m in self.store.task_mrs(task.task_id)}.get(payload["repo"])
-        if not mr:
-            self.store.action_done(key)
-            return True
+        True once the reply is posted or found there. False while it cannot be delivered: its thread is not to be
+        found, in the listing or by its id, or the host answers 404 to reading the merge request or to the post. The
+        reply then stays journaled for retry_pending while the task and its other replies go on. Nothing is posted
+        into a thread the runner cannot see, since a reply posted before a crash could not be checked for there. It is
+        never dropped: a 404 does not tell a deleted thread from one the bot may not see, and no answer of the host
+        proves a deletion. Other failures (5xx, timeouts) raise as before and are retried on the next tick."""
+        where = self._reply_mr(task, payload)
+        if where is None:
+            return self._reply_waits(task, key, payload, "its merge request is no longer in the task")
+        project_id, iid, url = where
         marker = f"<!-- arceus:{payload['signal']} -->"
-        thread = [n for n in self.host.notes(mr.project_id, mr.iid, mr.url) if n.discussion_id == payload["discussion"]]
-        by_id = getattr(self.host, "thread", None)
-        if not thread and by_id:
-            thread = by_id(mr.project_id, mr.iid, mr.url, payload["discussion"]) or []
-            if not thread:
-                if key not in self._waiting:
-                    self._waiting.add(key)
-                    self.events.emit("reply_waits", task_id=task.task_id, repo=payload["repo"],
-                                     signal=payload["signal"], discussion=payload["discussion"],
-                                     reason="thread not found")
-                return False
+        try:
+            thread = [n for n in self.host.notes(project_id, iid, url) if n.discussion_id == payload["discussion"]]
+            by_id = getattr(self.host, "thread", None)
+            if not thread and by_id:
+                thread = by_id(project_id, iid, url, payload["discussion"]) or []
+                if not thread:
+                    return self._reply_waits(task, key, payload, "thread not found")
+            # A host that cannot look a thread up by its id gets the reply as before: posting is all it can do.
+            if not any(marker in n.body and n.author == self.cfg.code_host.bot_user for n in thread):
+                self.host.reply(project_id, iid, payload["discussion"], f"{payload['body']}\n\n{marker}")
+        except NotFound as e:
+            return self._reply_waits(task, key, payload, str(e))
         self._waiting.discard(key)
-        # A host that cannot look a thread up by its id gets the reply as before: posting is all it can do.
-        if not any(marker in n.body and n.author == self.cfg.code_host.bot_user for n in thread):
-            self.host.reply(mr.project_id, mr.iid, payload["discussion"], f"{payload['body']}\n\n{marker}")
         self.store.action_done(key)
         self.store.mark_replied(payload["signal"])
         return True
+
+    def _reply_mr(self, task: Task, payload: dict) -> tuple | None:
+        """Where the reply goes: the merge request pinned in its journal entry; an entry written before pinning
+        names only the repository, and goes to that repository's merge request while the task still has one."""
+        if payload.get("project_id") is not None and payload.get("iid") is not None:
+            return payload["project_id"], payload["iid"], payload.get("mr_url") or ""
+        mr = {m.repo: m for m in self.store.task_mrs(task.task_id)}.get(payload["repo"])
+        return (mr.project_id, mr.iid, mr.url) if mr else None
+
+    def _reply_waits(self, task: Task, key: str, payload: dict, reason: str) -> bool:
+        if key not in self._waiting:  # said once per wait, not on every tick
+            self._waiting.add(key)
+            self.events.emit("reply_waits", task_id=task.task_id, repo=payload["repo"], signal=payload["signal"],
+                             discussion=payload["discussion"], reason=reason)
+        return False
 
     def note_moved(self, task: Task, repo: str, remote: str, sha: str, published: str | None = None,
                    rewritten: bool = False) -> None:

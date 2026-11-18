@@ -892,7 +892,63 @@ def test_a_host_that_cannot_look_a_thread_up_by_id_keeps_replying_as_before(w, m
     w.gl.discussions[1] = [x for x in w.gl.discussions[1] if x["id"] != deleted]
     fix_and_settle(w)
     assert len(bot_replies(w, live)) == 1                      # not in the listing: the reply is still posted
-    assert w.store.task("ACME-1").state == "publishing" and w.events_named("reconcile_failed")
+    assert w.store.task("ACME-1").state == "code_review"      # the refused one waits without holding the task
+    [waits] = w.events_named("reply_waits")
+    assert waits["discussion"] == deleted
+
+
+def test_a_reply_refused_with_404_in_a_thread_it_can_see_waits_while_the_next_thread_is_answered(w):
+    published(w)
+    first = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    second = w.gl.note(1, "reviewer", "@acme-agent-bot Add a test")
+    w.tick()
+    later(w)
+    w.gl.refused_replies.add(first)                            # shown, but the post answers 404
+    fix_and_settle(w)
+    assert w.store.task("ACME-1").state == "code_review"
+    assert len(bot_replies(w, first)) == 0 and len(bot_replies(w, second)) == 1
+    assert not w.events_named("reconcile_failed")
+    w.gl.refused_replies.clear()                               # access is back
+    later(w)
+    later(w)
+    assert len(bot_replies(w, first)) == 1 and len(bot_replies(w, second)) == 1
+    assert all(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
+
+
+def test_a_404_on_the_discussions_listing_keeps_the_replies_pending_and_posts_each_once_later(w):
+    published(w)
+    a = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    b = w.gl.note(1, "reviewer", "@acme-agent-bot Add a test")
+    w.tick()
+    later(w)
+    w.agent_commits("fix.txt")
+    w.settle("ACME-1", "waiting_review", outcome={"summary": "renamed"})
+    w.gl.listing_404 = True
+    w.tick()
+    assert w.store.task("ACME-1").state == "code_review"
+    assert len(bot_replies(w, a)) == 0 and len(bot_replies(w, b)) == 0
+    w.gl.listing_404 = False
+    later(w)
+    later(w)
+    assert len(bot_replies(w, a)) == 1 and len(bot_replies(w, b)) == 1
+
+
+def test_a_pending_reply_goes_to_the_merge_request_it_was_written_for_after_the_task_drops_it(w):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.tick()
+    later(w)
+    w.gl.refused_replies.add(d)
+    fix_and_settle(w)
+    [signal] = w.store.signals_of_kind("ACME-1", "review")
+    key = f"ACME-1:reply:{signal.id}"
+    assert json.loads(w.store.action(key)[1])["iid"] == 1     # the journal names the MR, not only the repository
+    w.store.drop_mr("ACME-1", "acme-platform")                 # a later round takes the MR out of the task
+    w.gl.refused_replies.clear()
+    later(w)
+    assert len(bot_replies(w, d)) == 1                         # delivered in its own MR, once
+    later(w)
+    assert len(bot_replies(w, d)) == 1 and w.store.action(key)[0] == "done"
 
 
 def test_a_reply_the_host_fails_for_now_is_posted_on_a_later_tick(w, monkeypatch):

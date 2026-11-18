@@ -207,6 +207,8 @@ class FakeGitLab:
         self.refuse_awards: int | None = None     # the status every emoji reaction call gets, as in an outage
         self.unlisted: set[str] = set()  # discussions the listing leaves out (a page it did not get) but that exist
         self.unfound: set[str] = set()   # discussions a GET by id answers with a plain 404 although they exist
+        self.refused_replies: set[str] = set()  # discussions shown, whose replies get a plain 404 (no access)
+        self.listing_404 = False         # the MR's discussions listing answers 404, as for an account without access
 
     def mr(self, iid: int) -> dict:
         return next(m for m in self.mrs if m["iid"] == iid)
@@ -287,6 +289,8 @@ class FakeGitLab:
                 self.note(iid, who, json.loads(request.content)["body"])
                 return json_response({"id": self._note}, 201)
             if tail == ["discussions"]:
+                if self.listing_404:
+                    return json_response({"message": "404 Not found"}, 404)
                 page = int(request.url.params.get("page", 1))
                 listed = [d for d in self.discussions.get(iid, []) if d["id"] not in self.unlisted]
                 return json_response(listed if page == 1 else [], headers={"x-next-page": ""})
@@ -310,7 +314,7 @@ class FakeGitLab:
                 awards.append({"id": len(awards) + 1, "name": name, "user": {"username": who}})
                 return json_response(awards[-1], 201)
             if len(tail) == 3 and tail[0] == "discussions" and tail[2] == "notes":
-                if not any(d["id"] == tail[1] for d in self.discussions.get(iid, [])):
+                if tail[1] in self.refused_replies or not any(d["id"] == tail[1] for d in self.discussions.get(iid, [])):
                     return json_response({"message": "404 Not found"}, 404)
                 body = json.loads(request.content)["body"]
                 self.note(iid, self.username, body, discussion=tail[1])

@@ -52,7 +52,7 @@ Some capabilities are optional. Without them the flow keeps working, with less:
 | Logs of failed jobs (`failed_jobs`) | the agent gets the link to the run only |
 | Conflict detection (`MRStatus.conflict`) | `None` means "not known" and sends nothing; a conflict reaches the agent through people |
 | Threaded replies | `reply()` posts a plain comment on the merge request instead |
-| One thread by its id (`thread`) | a thread missing from the listing still gets the reply posted; a reply to a thread people deleted is retried until it goes through, and holds the task in publishing |
+| One thread by its id (`thread`) | a reply to a thread missing from the listing is posted anyway; a 404 to it leaves the reply pending, retried on every tick |
 | Uploads to the code host (`supports_uploads`) | screenshots go to the ticket only |
 | Attachments on the tracker (`supports_attachments`) | screenshots go to the merge requests only |
 | Assignee (`assign_to_bot`) | nothing is assigned |
