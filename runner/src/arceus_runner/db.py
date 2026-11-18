@@ -1725,6 +1725,9 @@ class ReviewStore(TaskStore):
     def mark_replied(self, sig_id: str) -> None:
         self.conn.execute("UPDATE signals SET replied = 1 WHERE id = ?", (sig_id,))
 
+    def mark_unreplied(self, sig_id: str) -> None:
+        self.conn.execute("UPDATE signals SET replied = 0 WHERE id = ?", (sig_id,))
+
     def pending_review_tasks(self) -> set[str]:
         """Tasks in review with comments or a batch not yet given to the agent: a round that is about to start."""
         rows = self.conn.execute(

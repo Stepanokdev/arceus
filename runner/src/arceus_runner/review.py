@@ -693,6 +693,7 @@ class ReviewLoop:
                 self.store.action_intent(key, task.task_id, "reply", json.dumps(payload))
             if not self.retry_reply(task, key, json.loads(act[1]) if act and act[1] else payload):
                 return False  # not delivered now: the reply stays journaled, retry_pending tries it again
+            return True  # retry_reply marked the thread's notes with the journal entry
         self.store.mark_replied(s.id)
         return True
 
@@ -723,18 +724,19 @@ class ReviewLoop:
         except NotFound as e:
             return self._reply_waits(task, key, payload, str(e))
         self._waiting.pop(key, None)
-        self.store.action_done(key)
-        self._mark_thread_replied(task, payload)
+        with self.store.transaction():  # the journal and the notes it answers move together, or neither does
+            self.store.action_done(key)
+            for sig_id in self._thread_signals(task, payload):
+                self.store.mark_replied(sig_id)
         return True
 
-    def _mark_thread_replied(self, task: Task, payload: dict) -> None:
-        """The reply answers every note of its thread that came in the same round."""
-        self.store.mark_replied(payload["signal"])
+    def _thread_signals(self, task: Task, payload: dict) -> list[str]:
+        """The notes the reply answers: its own and every other note of its thread from the same round."""
         s = self.store.signal(payload["signal"])
-        if s and s.batch_id:
-            for other in self.store.signals(task.task_id, s.batch_id):
-                if (other.repo, other.discussion_id) == (s.repo, s.discussion_id) and not other.replied:
-                    self.store.mark_replied(other.id)
+        if not s or not s.batch_id:
+            return [payload["signal"]]
+        return [o.id for o in self.store.signals(task.task_id, s.batch_id)
+                if (o.repo, o.discussion_id) == (s.repo, s.discussion_id)]
 
     def _reply_mr(self, task: Task, key: str, payload: dict) -> tuple | None:
         """Where the reply goes: the merge request pinned in its journal entry. An entry written before pinning
@@ -761,6 +763,10 @@ class ReviewLoop:
         return found
 
     def _reply_waits(self, task: Task, key: str, payload: dict, reason: str) -> bool:
+        # None of the notes it answers is answered yet, whatever an earlier version marked (it marked a thread's
+        # second note before the reply had gone out).
+        for sig_id in self._thread_signals(task, payload):
+            self.store.mark_unreplied(sig_id)
         if self._waiting.get(key) != reason:  # said when the reason changes, not on every tick
             self._waiting[key] = reason
             self.events.emit("reply_waits", task_id=task.task_id, repo=payload["repo"], signal=payload["signal"],

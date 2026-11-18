@@ -1027,6 +1027,55 @@ def test_notes_of_one_thread_stay_unanswered_until_its_one_reply_goes_out(w):
     assert all(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
 
 
+def test_a_thread_note_an_earlier_version_marked_answered_is_unmarked_while_the_reply_waits(w):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.gl.note(1, "reviewer", "@acme-agent-bot and the alias too", discussion=d)
+    w.tick()
+    later(w)
+    w.gl.refused_replies.add(d)
+    fix_and_settle(w)
+    first, second = w.store.signals_of_kind("ACME-1", "review")
+    w.store.mark_replied(second.id)                            # what the version before marked at once
+    later(w)                                                   # the reply is retried and still refused
+    assert not any(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
+    assert w.store.action(f"ACME-1:reply:{first.id}")[0] == "intent"
+    w.gl.refused_replies.clear()
+    later(w)
+    later(w)
+    assert len(bot_replies(w, d)) == 1
+    assert all(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
+
+
+def test_a_stop_after_a_pending_reply_went_out_leaves_it_journaled_and_the_retry_marks_every_note(w, monkeypatch):
+    published(w)
+    d = w.gl.note(1, "reviewer", "@acme-agent-bot Rename it")
+    w.gl.note(1, "reviewer", "@acme-agent-bot and the alias too", discussion=d)
+    w.tick()
+    later(w)
+    w.gl.refused_replies.add(d)
+    fix_and_settle(w)
+    first, _ = w.store.signals_of_kind("ACME-1", "review")
+    key = f"ACME-1:reply:{first.id}"
+    w.gl.refused_replies.clear()
+    real = w.store.mark_replied
+
+    def die(sig_id):
+        raise RuntimeError("stopped between the journal and the notes")
+
+    monkeypatch.setattr(w.store, "mark_replied", die)
+    with pytest.raises(RuntimeError, match="stopped"):
+        later(w)
+    assert len(bot_replies(w, d)) == 1                         # it went out
+    assert w.store.action(key)[0] == "intent"                  # yet the journal did not move without the notes
+    monkeypatch.setattr(w.store, "mark_replied", real)
+    w.restart()
+    later(w)
+    assert len(bot_replies(w, d)) == 1                         # its marker settles it: no second post
+    assert w.store.action(key)[0] == "done"
+    assert all(s.replied for s in w.store.signals_of_kind("ACME-1", "review"))
+
+
 def test_a_reply_the_host_fails_for_now_is_posted_on_a_later_tick(w, monkeypatch):
     from arceus_runner.gitlab import GitLabReview
     from arceus_runner.http import TransientError
