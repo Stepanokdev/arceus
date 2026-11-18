@@ -172,9 +172,8 @@ footer ul { padding-left: 20px; }
 def _filter_css() -> str:
     """
     The filter's rules, one set per kind of FILTERS: its label lit, the other list hidden, and for a check result
-    the checks and groups of other results hidden. A problem a check links to (#f1) shows whatever the filter.
+    the checks and groups of other results hidden.
     """
-    checked = [f"#qa-show-{kind}:checked ~" for kind, __ in FILTERS]
     results = [kind for kind, __ in FILTERS if kind != "finding"]
     lit = ",\n".join(f'#qa-show-{kind}:checked ~ .qa-filter label[for="qa-show-{kind}"]'
                      for kind in ["all", *(kind for kind, __ in FILTERS)])
@@ -184,9 +183,8 @@ def _filter_css() -> str:
         hide += [f"#qa-show-{kind}:checked ~ .qa-checks .qa-item:not(.{kind})",
                  f"#qa-show-{kind}:checked ~ .qa-checks .qa-group:not(:has(.qa-item.{kind}))"]
     hidden = ",\n".join(hide)
-    target = ",\n".join(f"{c} .qa-findings:has(.qa-item:target)" for c in checked)
     return (f"{lit} {{\n  color: var(--blue); background: var(--blue-soft); border-color: var(--blue); }}\n"
-            f"{hidden} {{ display: none; }}\n{target} {{ display: block; }}\n")
+            f"{hidden} {{ display: none; }}\n")
 
 
 STYLE += _filter_css()
@@ -452,7 +450,7 @@ def run_body(view: dict, project: str, tz: ZoneInfo) -> tuple[str, str]:
         body.append('<div class="alert note"><p><strong>Not a clean result:</strong></p><ul>'
                     + "".join(f"<li>{e(x)}</li>" for x in doubts) + "</ul></div>")
     body.append(_board(view.get("tested") or [], findings))
-    problems = view.get("problems") or []
+    problems = [*(view.get("problems") or []), *(view.get("notes") or [])]
     if problems:
         body.append('<div class="alert note"><p><strong>Left out of this report</strong> (the agent\'s report did not '
                     'hold up there):</p><ul>' + "".join(f"<li>{e(p)}</li>" for p in problems) + "</ul></div>")

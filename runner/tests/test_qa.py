@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import urllib.error
 import urllib.request
@@ -1421,44 +1422,91 @@ def test_a_check_keeps_its_group_its_cases_its_requirement_and_its_finding(tmp_p
     assert first["group"] == "US-2 Cart" and first["spec"] == spec and first["finding"] == 1
     assert [c["result"] for c in first["cases"]] == ["ok", "problem", "skipped"]
     assert first["cases"][1] == {"what": "TEST10 on two items", "result": "problem", "note": "no discount"}
-    assert second["spec"] is None and second["finding"] is None and len(second["cases"]) == 30
+    assert second["spec"] is None and second["finding"] is None and len(second["cases"]) == 40
     assert old == {"what": "Old shape", "result": "blocked", "note": "no mail", "group": "", "spec": None,
                    "cases": None, "finding": None}
     assert data["findings"][0]["spec"] == spec
 
 
-def test_cases_left_out_are_named(tmp_path):
-    """
-    Test that cases past the limit and cases with no readable `what` are named among what was left out.
-    """
-    folder, dest = tmp_path / "out", tmp_path / "dest"
+def _loaded(tmp_path, report: dict) -> tuple[dict, list[str]]:
+    folder = tmp_path / "out"
     folder.mkdir()
-    (folder / "findings.json").write_text(json.dumps({
-        "tested": [{"what": "Many", "result": "ok",
-                    "cases": [{"what": f"case {i}", "result": "ok"} for i in range(40)] + [{"result": "ok"}]}]}))
-    data, problems = load_findings(folder, dest)
-    assert len(data["tested"][0]["cases"]) == 30
-    assert any("a case of the check 'Many' has no readable `what`" in p for p in problems)
-    assert any("'Many' lists 40 cases" in p and "10 are left out" in p for p in problems)
+    (folder / "findings.json").write_text(json.dumps(report))
+    return load_findings(folder, tmp_path / "dest")
+
+
+def test_every_case_is_kept_and_the_run_still_passes(tmp_path):
+    """
+    Test that a check keeps all its cases, however many, and a run of such checks that all worked passes.
+    """
+    data, problems = _loaded(tmp_path, {"tested": [
+        {"what": "Many", "result": "ok", "cases": [{"what": f"case {i}", "result": "ok"} for i in range(100)]}]})
+    assert len(data["tested"][0]["cases"]) == 100 and data["notes"] == [] and problems == []
+    assert outcome_of(data, problems, [], False) == ("passed", [])
+
+
+def test_a_case_with_no_what_is_noted_but_does_not_change_the_outcome(tmp_path):
+    """
+    Test that a case with no readable `what` is left out and named among the notes, and the run still passes.
+    """
+    data, problems = _loaded(tmp_path, {"tested": [
+        {"what": "Many", "result": "ok", "cases": [{"what": "one", "result": "ok"}, {"result": "ok"}]}]})
+    assert len(data["tested"][0]["cases"]) == 1 and problems == []
+    assert data["notes"] == ["a case of the check 'Many' has no readable `what`"]
+    assert outcome_of(data, problems, [], False) == ("passed", [])
 
 
 def test_a_check_links_to_the_finding_as_the_report_numbers_it(tmp_path):
     """
     Test that a check's `finding`, the agent's place in `findings`, links to that finding's number in the report,
     which skips untitled ones; that one pointing at a dropped finding links nowhere; and that a check not marked
-    a problem links nowhere and is named.
+    a problem links nowhere. Both are named in the notes, not the problems.
     """
-    folder, dest = tmp_path / "out", tmp_path / "dest"
-    folder.mkdir()
-    (folder / "findings.json").write_text(json.dumps({
+    data, problems = _loaded(tmp_path, {
         "tested": [{"what": "B", "result": "problem", "finding": 3},
                    {"what": "Untitled", "result": "problem", "finding": 1},
                    {"what": "Fine", "result": "ok", "finding": 2}],
-        "findings": [{"title": ""}, {"title": "A"}, {"title": "B"}]}))
-    data, problems = load_findings(folder, dest)
+        "findings": [{"title": ""}, {"title": "A"}, {"title": "B"}]})
     assert [f["title"] for f in data["findings"]] == ["A", "B"]
     assert [c["finding"] for c in data["tested"]] == [2, None, None]
-    assert any("'Fine' is marked ok but names finding 2" in p for p in problems)
+    assert any("'Untitled' names finding 1, but finding 1 is not in the report" in n for n in data["notes"])
+    assert any("'Fine' is marked ok but names finding 2" in n for n in data["notes"])
+    assert not any("'Fine'" in p or "'Untitled'" in p for p in problems)
+
+
+def test_a_dangling_finding_number_is_noted_and_the_run_still_passes(tmp_path):
+    """
+    Test that an ok check naming a finding, and a problem check naming one that does not exist, are noted
+    without changing the outcome.
+    """
+    data, problems = _loaded(tmp_path, {
+        "tested": [{"what": "Cart", "result": "problem", "finding": 5}, {"what": "Fine", "result": "ok"}],
+        "findings": [{"title": "A", "steps": ["a"]}]})
+    assert data["tested"][0]["finding"] is None and problems == []
+    assert data["notes"] == ["the check 'Cart' names finding 5, but finding 5 is not in the report, so the link "
+                             "is not shown"]
+    assert outcome_of(data, problems, [], False) == ("found", [])
+    only_ok, problems = load_findings(*_rewrite(tmp_path, {
+        "tested": [{"what": "Fine", "result": "ok", "finding": 1}]}))
+    assert problems == [] and outcome_of(only_ok, problems, [], False) == ("passed", [])
+
+
+def _rewrite(tmp_path, report: dict) -> tuple[Path, Path]:
+    (tmp_path / "out" / "findings.json").write_text(json.dumps(report))
+    return tmp_path / "out", tmp_path / "dest"
+
+
+def test_a_case_marked_as_a_problem_with_no_finding_is_unfinished(tmp_path):
+    """
+    Test that a check marked ok whose case is a problem, with no finding, does not pass; with a finding, the run
+    found it.
+    """
+    check = {"what": "Discount", "result": "ok", "cases": [{"what": "Two items", "result": "problem"}]}
+    data, problems = _loaded(tmp_path, {"tested": [check]})
+    assert outcome_of(data, problems, [], False) == (
+        "unfinished", ["a case of a check is marked as a problem, but no finding says what the problem is"])
+    found, problems = load_findings(*_rewrite(tmp_path, {"tested": [check], "findings": [{"title": "A"}]}))
+    assert outcome_of(found, problems, [], False)[0] == "found"
 
 
 def _qa_run_view(**overrides) -> dict:
@@ -1559,28 +1607,57 @@ def test_a_check_without_its_cases_says_so_whatever_its_result():
     assert "Nothing of this check was tried." in body and "did not list" not in body
 
 
-def test_the_filter_rules_cover_every_kind_and_a_linked_problem_shows():
+def _css_rules(style: str) -> list[tuple[list[str], dict[str, str]]]:
     """
-    Test that the stylesheet has a lit label, a hide rule and a linked-problem reveal for every filter kind, and
-    that a check's title is not coloured by another page's rules for details.
+    The stylesheet's rules as (selectors, declarations), @media blocks flattened.
+    """
+    rules = []
+    for block in re.sub(r"@media[^{]*\{", "", style).split("}"):
+        if "{" not in block:
+            continue
+        head, body = block.rsplit("{", 1)
+        selectors = [s.strip() for s in head.split(",") if s.strip()]
+        declarations = dict((k.strip(), v.strip()) for k, __, v in
+                            (d.partition(":") for d in body.split(";") if ":" in d))
+        rules.append((selectors, declarations))
+    return rules
+
+
+def _declared(style: str, selector: str) -> dict[str, str]:
+    return {k: v for selectors, declarations in _css_rules(style) if selector in selectors
+            for k, v in declarations.items()}
+
+
+def test_the_filter_rules_cover_every_kind():
+    """
+    Test that the stylesheet lights the label of every filter kind and hides what each does not show, and that a
+    check's title sets its own colour, so another page's rules for details do not colour it.
     """
     style = qa_report.STYLE
     for kind, __ in qa_report.FILTERS:
-        assert f'label[for="qa-show-{kind}"]' in style, kind
-        assert f"#qa-show-{kind}:checked ~ .qa-findings:has(.qa-item:target)" in style, kind
-        if kind != "finding":
-            assert f"#qa-show-{kind}:checked ~ .qa-checks .qa-item:not(.{kind})" in style, kind
-    assert style.index("{ display: none; }") < style.index(".qa-findings:has(.qa-item:target)")
-    assert "list-style: none; color: var(--ink); }" in style
+        assert _declared(style, f'#qa-show-{kind}:checked ~ .qa-filter label[for="qa-show-{kind}"]').get("color")
+        hidden = (f"#qa-show-{kind}:checked ~ .qa-checks" if kind == "finding"
+                  else f"#qa-show-{kind}:checked ~ .qa-checks .qa-item:not(.{kind})")
+        assert _declared(style, hidden).get("display") == "none", kind
+    assert "color" in _declared(style, ".qa-item > summary")
+
+
+def test_notes_are_listed_with_what_was_left_out():
+    """
+    Test that the notes on a report are shown under what was left out of it.
+    """
+    __, body = qa_report.run_body(_qa_run_view(notes=["the check 'A' names finding 5"]), "acme", ZoneInfo("UTC"))
+    assert "Left out of this report" in body and "the check &#x27;A&#x27; names finding 5" in body
 
 
 def test_the_brief_and_the_review_ask_for_cases_and_the_requirement(w):
     """
-    Test that the brief asks for groups, cases and the requirement, and the closing review holds the report
-    to them.
+    Test that the brief asks for groups, cases and the requirement, and that the closing review does not fail a
+    report for lacking them alone.
     """
     from arceus_runner.qa import REPORT_CRITERIA
     queue(w)
     text = dispatches(w)[0]["argv"][-1]
     assert "`cases`" in text and "`spec`" in text and "`group`" in text
-    assert "requirement it breaks" in REPORT_CRITERIA and "which of its cases were tried" in REPORT_CRITERIA
+    assert "`cases`" in REPORT_CRITERIA and "`spec`" in REPORT_CRITERIA
+    assert "their absence alone is not grounds for FAIL" in " ".join(REPORT_CRITERIA.split())
