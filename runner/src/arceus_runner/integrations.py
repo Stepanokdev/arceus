@@ -277,6 +277,7 @@ class Note:
     line: int | None
     url: str
     commit: str | None = None  # the version of the merge request a diff comment was written on
+    resolved: bool = False
 
 
 @dataclass(frozen=True)
