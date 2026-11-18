@@ -29,6 +29,14 @@ HEADS = {"passed": "No problems found", "partial": "No problems in what was chec
          "unfinished": "Did not finish", "stopped": "Stopped"}
 RESULT_WORDS = {"ok": "Works", "problem": "Problem", "blocked": "Could not check", "skipped": "Skipped"}
 SEVERITY_WORDS = {"critical": "Critical", "major": "Major", "minor": "Minor"}
+TYPE_AC = "ac"
+TYPE_SECURITY = "security"
+TYPE_UI = "ui"
+TYPE_PERFORMANCE = "performance"
+TYPE_OTHER = "other"
+TYPE_WORDS = {TYPE_AC: "AC", TYPE_SECURITY: "Security", TYPE_UI: "UI/UX", TYPE_PERFORMANCE: "Performance",
+              TYPE_OTHER: "Other"}
+TYPES = tuple(TYPE_WORDS)
 # What the report can be filtered to: the problems, then the checks by their result.
 FILTERS = (("finding", "Findings"), ("ok", "Works"), ("problem", "Problem"), ("blocked", "Could not check"),
            ("skipped", "Skipped"))
@@ -88,6 +96,7 @@ h3 { font-size: 1.05rem; line-height: 1.35; margin: 0; }
 .tag.problem, .tag.critical { color: var(--bad); background: var(--bad-soft); }
 .tag.major { color: var(--warn); background: var(--warn-soft); }
 .tag.blocked, .tag.skipped, .tag.minor { color: var(--quiet); background: var(--bg); }
+.tag.kind { color: var(--blue); background: var(--blue-soft); }
 .finding { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 20px;
            margin: 0 0 16px; }
 .finding header { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
@@ -128,6 +137,7 @@ td .blocked { color: var(--bad); } td .stopped { color: var(--quiet); }
                                        background: var(--surface); font-size: 0.9rem; cursor: pointer; }
 .qa-filter b { margin-left: 4px; color: var(--muted); font-weight: 600; }
 .qa-filter .qa-off { opacity: 0.5; cursor: default; }
+.qa-filter.qa-types { margin: 0 0 12px; }
 .qa-radio:focus-visible ~ .qa-filter { outline: 2px solid var(--blue); outline-offset: 4px; border-radius: 8px; }
 .qa-group h3 { margin: 20px 0 8px; font-size: 1rem; color: var(--muted); }
 .qa-item { margin: 0 0 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
@@ -182,6 +192,9 @@ def _filter_css() -> str:
     for kind in results:
         hide += [f"#qa-show-{kind}:checked ~ .qa-checks .qa-item:not(.{kind})",
                  f"#qa-show-{kind}:checked ~ .qa-checks .qa-group:not(:has(.qa-item.{kind}))"]
+    lit += ",\n" + ",\n".join(f'#qa-type-{kind}:checked ~ .qa-findings .qa-types label[for="qa-type-{kind}"]'
+                              for kind in ["all", *TYPES])
+    hide += [f"#qa-type-{kind}:checked ~ .qa-findings .qa-finding:not(.qa-type-{kind})" for kind in TYPES]
     hidden = ",\n".join(hide)
     return (f"{lit} {{\n  color: var(--blue); background: var(--blue-soft); border-color: var(--blue); }}\n"
             f"{hidden} {{ display: none; }}\n")
@@ -329,8 +342,21 @@ def _board(tested: list[dict], findings: list[dict]) -> str:
             labels.append(f'<label for="qa-show-{kind}">{word} <b>{counts[kind]}</b></label>')
         else:
             labels.append(f'<span class="qa-off">{word} <b>0</b></span>')
+    types = [type_of(finding) for finding in findings]
+    type_labels = []
+    if findings:
+        radios.append('<input type="radio" class="qa-radio" name="qa-type" id="qa-type-all" checked>')
+        type_labels.append(f'<label for="qa-type-all">All types <b>{len(findings)}</b></label>')
+        for kind, word in TYPE_WORDS.items():
+            if types.count(kind):
+                radios.append(f'<input type="radio" class="qa-radio" name="qa-type" id="qa-type-{kind}">')
+                type_labels.append(f'<label for="qa-type-{kind}">{word} <b>{types.count(kind)}</b></label>')
+            else:
+                type_labels.append(f'<span class="qa-off">{word} <b>0</b></span>')
     parts = radios + [f'<nav class="qa-filter" aria-label="Show">{"".join(labels)}</nav>',
                       '<section class="qa-findings"><h2>Problems</h2>']
+    if findings:
+        parts.append(f'<nav class="qa-filter qa-types" aria-label="Problem type">{"".join(type_labels)}</nav>')
     parts += [_finding(number, finding) for number, finding in enumerate(findings, 1)] if findings \
         else ['<p class="empty">None reported.</p>']
     parts.append('</section><section class="qa-checks"><h2>What was checked</h2>')
@@ -348,12 +374,20 @@ def _board(tested: list[dict], findings: list[dict]) -> str:
     return '<div class="qa-board">' + "\n".join(parts) + "</div>"
 
 
+def type_of(finding: dict) -> str:
+    """
+    A finding's type; one from before types, or of a type not known, is TYPE_OTHER.
+    """
+    return finding.get("type") if finding.get("type") in TYPES else TYPE_OTHER
+
+
 def _finding(number: int, finding: dict) -> str:
     """
-    One problem as an accordion: its severity, title and requirement on its line, then its steps with their
+    One problem as an accordion: its severity, type, title and requirement on its line, then its steps with their
     screenshots, expected against actual, and the suspected cause.
     """
     severity = finding.get("severity") or "major"
+    kind = type_of(finding)
     tries = ""
     if finding.get("attempts"):
         tries = f"Happened {finding.get('reproduced') or 0} of {finding['attempts']} times"
@@ -362,8 +396,9 @@ def _finding(number: int, finding: dict) -> str:
     url = finding.get("url")
     link = f'<a href="{e(url)}"{NEW_TAB}>{e(url)}</a>' if url else ""
     meta = [text for text in (tries, link) if text]
-    parts = [f'<details class="qa-item qa-finding" id="f{number}">',
+    parts = [f'<details class="qa-item qa-finding qa-type-{kind}" id="f{number}">',
              f'<summary><span class="tag {e(severity)}">{SEVERITY_WORDS.get(severity, e(severity))}</span>'
+             f'<span class="tag kind">{TYPE_WORDS[kind]}</span>'
              f'<span class="qa-title">{rich(finding["title"])}</span>{_spec_ref(finding.get("spec"))}</summary>',
              '<div class="qa-body">']
     if meta:

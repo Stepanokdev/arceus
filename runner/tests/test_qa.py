@@ -1043,7 +1043,7 @@ def test_findings_are_read_defensively(tmp_path):
     assert data["tested"] == [{"what": "A", "result": "skipped", "note": "", "group": "", "spec": None,
                                "cases": None, "finding": None}]
     [f] = data["findings"]
-    assert (f["severity"], f["url"], f["failed_step"]) == ("major", "", None)
+    assert (f["severity"], f["type"], f["url"], f["failed_step"]) == ("major", qa_report.TYPE_OTHER, "", None)
     assert [e["step"] for e in f["evidence"]] == [1]
     assert [p.name for p in dest.iterdir()] == [f["evidence"][0]["file"]]
     assert any("fake.png" in p for p in problems) and any("link.png" in p for p in problems)
@@ -1529,7 +1529,8 @@ def _qa_run_view(**overrides) -> dict:
                                                           {"what": "Paging", "result": "skipped", "note": ""},
                                                           {"what": "Filter", "result": "skipped", "note": ""}]},
                        {"what": "Before the update", "result": "ok", "note": "worked"}],
-            "findings": [{"title": "No discount on two items", "severity": "major", "spec": spec,
+            "findings": [{"title": "No discount on two items", "severity": "major", "type": qa_report.TYPE_AC,
+                          "spec": spec,
                           "url": "https://staging.example.com/cart", "steps": ["Open the cart", "Apply TEST10"],
                           "failed_step": 2, "expected": "10% off.", "actual": "Full price.",
                           "evidence": [{"file": "abc.png", "caption": "Cart", "step": 2, "kind": "image"},
@@ -1568,6 +1569,24 @@ def test_the_report_filters_by_type_and_counts_each():
     only_ok = _qa_run_view(findings=[], tested=[{"what": "A", "result": "ok"}])
     __, quiet = qa_report.run_body(only_ok, "acme", ZoneInfo("UTC"))
     assert 'id="qa-show-ok"' in quiet and 'id="qa-show-finding"' not in quiet and 'id="qa-show-skipped"' not in quiet
+
+
+def test_each_finding_shows_its_type_and_the_problems_filter_by_type():
+    """
+    Test that each finding carries its type as a tag and a class, a finding without one is of TYPE_OTHER, and the
+    Problems list offers a filter per type with its count, a type with none shown as off.
+    """
+    __, body = qa_report.run_body(_qa_run_view(), "acme", ZoneInfo("UTC"))
+    assert f'qa-finding qa-type-{qa_report.TYPE_AC}"' in body and f'qa-finding qa-type-{qa_report.TYPE_OTHER}"' in body
+    assert f'<span class="tag kind">{qa_report.TYPE_WORDS[qa_report.TYPE_AC]}</span>' in body
+    assert '<label for="qa-type-all">All types <b>2</b></label>' in body
+    for kind in (qa_report.TYPE_AC, qa_report.TYPE_OTHER):
+        assert f'id="qa-type-{kind}"' in body
+        assert f'<label for="qa-type-{kind}">{qa_report.TYPE_WORDS[kind]} <b>1</b></label>' in body
+    assert f'id="qa-type-{qa_report.TYPE_SECURITY}"' not in body
+    assert f'<span class="qa-off">{qa_report.TYPE_WORDS[qa_report.TYPE_SECURITY]} <b>0</b></span>' in body
+    __, none = qa_report.run_body(_qa_run_view(findings=[]), "acme", ZoneInfo("UTC"))
+    assert "qa-type-all" not in none and "qa-types" not in none
 
 
 def test_screenshots_and_links_open_in_a_new_tab():
@@ -1638,6 +1657,12 @@ def test_the_filter_rules_cover_every_kind():
         assert _declared(style, f'#qa-show-{kind}:checked ~ .qa-filter label[for="qa-show-{kind}"]').get("color")
         hidden = (f"#qa-show-{kind}:checked ~ .qa-checks" if kind == "finding"
                   else f"#qa-show-{kind}:checked ~ .qa-checks .qa-item:not(.{kind})")
+        assert _declared(style, hidden).get("display") == "none", kind
+    for kind in ("all", *qa_report.TYPES):
+        assert _declared(style, f'#qa-type-{kind}:checked ~ .qa-findings .qa-types label[for="qa-type-{kind}"]'
+                         ).get("color"), kind
+    for kind in qa_report.TYPES:
+        hidden = f"#qa-type-{kind}:checked ~ .qa-findings .qa-finding:not(.qa-type-{kind})"
         assert _declared(style, hidden).get("display") == "none", kind
     assert "color" in _declared(style, ".qa-item > summary")
 

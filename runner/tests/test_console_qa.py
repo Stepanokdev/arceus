@@ -13,6 +13,7 @@ import yaml
 pytest.importorskip("starlette")
 from starlette.testclient import TestClient  # noqa: E402
 
+from arceus_runner import qa_report  # noqa: E402
 from arceus_runner.config import load_config  # noqa: E402
 from arceus_runner.console.store import ConsoleStore  # noqa: E402
 from arceus_runner.console.web import Settings, create_app  # noqa: E402
@@ -61,6 +62,7 @@ def w(tmp_path: Path):
             "instructions": {"path": "qa/instructions.md", "sha256": "ab" * 32},
             "tested": [{"what": "Signing in", "result": "problem"}, {"what": "The catalogue", "result": "ok"}],
             "findings": [{"title": "The Sign in button does nothing", "severity": "critical",
+                          "type": qa_report.TYPE_SECURITY,
                           "steps": ["Open `/login`", "Type the test account", "Press Sign in"], "failed_step": 3,
                           "evidence": [{"file": SHOT, "step": 3, "caption": "Nothing happens", "kind": "image"}],
                           "expected": "The dashboard opens", "actual": "The page stays as it is",
@@ -136,6 +138,7 @@ def test_a_run_opens_as_its_report_with_its_screenshot(w):
                   "The dashboard opens", "The page stays as it is", "Suspected cause in the code",
                   "https://gitlab.example.com/web/-/blob/x/src/login.ts#L12", "What was checked", "The catalogue"):
         assert words in page, words
+    assert f'<span class="tag kind">{qa_report.TYPE_WORDS[qa_report.TYPE_SECURITY]}</span>' in page
     assert f'src="media/{SHOT}"' in page
     r = viewer.get(f"/qa/1/media/{SHOT}")
     assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content == PNG
