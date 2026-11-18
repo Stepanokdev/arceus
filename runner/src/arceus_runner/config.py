@@ -196,6 +196,7 @@ class IssueTrackerConfig(Strict):
     tags: TrackerTags = TrackerTags()
     tags_on: TagsOn = TagsOn()
     states: TrackerStates
+    progress_comment: bool = True
 
     _gone = _refuse_gone("tracker")
     _check_env = field_validator("token_env")(_env_name)
@@ -350,6 +351,7 @@ class Schedule(Strict):
     poll_off_hours: Duration = timedelta(minutes=10)
     poll_local: Duration = timedelta(minutes=2)
     poll_progress: Duration = timedelta(seconds=30)  # engine steps and agent activity: local files only
+    progress_comment_every: Duration = timedelta(minutes=5)
     review_debounce: Duration = timedelta(minutes=5)
 
     _accept_old = _accept_retired("schedule", ("repo_sync",))
