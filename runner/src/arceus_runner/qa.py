@@ -54,6 +54,7 @@ REPORT_TIME = timedelta(hours=1)
 OUTCOMES = ("passed", "partial", "found", "blocked", "unfinished", "stopped")
 
 MAX_STEPS = 30
+MAX_CASES = 30                    # cases per check
 MAX_EVIDENCE = 10                 # files per finding
 NAMED = 10                        # what was left out, named one by one before "and N more"
 SEVERITIES = ("critical", "major", "minor")
@@ -76,13 +77,17 @@ findings.json (`parts`, `checks`, `findings_count`) are about the whole report; 
 all the parts. Judge the report by these points, and only these:
 
 1. Every finding says where it happens (a URL or screen), gives steps from a state anyone can reach, names the step
-   where it goes wrong, sets expected against actual, and says how many attempts reproduced it. A finding whose
-   steps or evidence do not support what it claims is grounds for FAIL.
+   where it goes wrong, sets expected against actual, and says how many attempts reproduced it. It names the
+   requirement it breaks (`spec`: its story and point as the instructions number them, and its text), or says the
+   instructions do not state it. A finding whose steps or evidence do not support what it claims is grounds for
+   FAIL.
 2. A finding names the screenshot or recording that shows it, at the step it proves; one without any says why. A
    picture of the tester's own words (a summary or a narrated result written onto a page) shows nothing of the
    platform and is no evidence; a raw request and response shown exactly as they went and came back is.
 3. The summary and the conclusions claim no more than the checks show: nothing is called working that was not
-   checked, and a check that could not be done or was skipped is listed as such, never as passed.
+   checked, and a check that could not be done or was skipped is listed as such, never as passed. Every check
+   lists its `cases`, what was actually done, each with its result; a blocked or skipped check says
+   which of its cases were tried, or that none were.
 4. The numbers agree: what the summary counts matches the checks and findings listed.
 5. A suspected cause in the code is put as a suspicion with its file and line. A finding with no cause found is
    not grounds for FAIL.
@@ -97,9 +102,19 @@ SCHEMA_EXAMPLE = """\
 {"summary": "Checked sign-in, the catalogue, the cart and checkout as a customer and as an admin. Checkout fails
              with a discount code; everything else worked.",
  "blocked": "",
- "tested": [{"what": "Sign-in as the customer account", "result": "ok", "note": ""},
-            {"what": "Checkout with a discount code", "result": "problem", "note": "see the first finding"}],
+ "tested": [{"what": "Sign-in as the customer account", "result": "ok", "note": "", "group": "US-1 Sign-in",
+             "spec": {"story": "US-1", "point": "1.1", "text": "A customer signs in with e-mail and password."},
+             "cases": [{"what": "Right password: the dashboard opens", "result": "ok", "note": ""},
+                       {"what": "Wrong password: an error under the field", "result": "ok", "note": ""}]},
+            {"what": "Checkout with a discount code", "result": "problem", "note": "", "group": "US-3 Checkout",
+             "spec": {"story": "US-3", "point": "3.2", "text": "The discount code applies at checkout."},
+             "cases": [{"what": "Pay with TEST10", "result": "problem", "note": "blank page"}], "finding": 1},
+            {"what": "Password reset e-mail", "result": "blocked", "note": "the stand sends no e-mail",
+             "group": "US-1 Sign-in", "spec": {"story": "US-1", "point": "1.4", "text": "A reset link is mailed."},
+             "cases": [{"what": "Request the reset: the e-mail sent page opens", "result": "ok", "note": ""},
+                       {"what": "Open the link from the e-mail", "result": "blocked", "note": "no e-mail"}]}],
  "findings": [{"title": "Checkout with a discount code shows a blank page",
+               "spec": {"story": "US-3", "point": "3.2", "text": "The discount code applies at checkout."},
                "severity": "major",
                "url": "https://staging.example.com/checkout",
                "steps": ["Sign in as the customer account", "Add any item to the cart", "Enter the code TEST10",
@@ -193,6 +208,52 @@ def report_parts(folder: Path) -> list[str]:
     return names
 
 
+def _spec(raw: object) -> dict | None:
+    """
+    The requirement a check or finding is about, as the instructions number and word it: its story, its point
+    and its text. None when the agent named none of them.
+    """
+    if not isinstance(raw, dict):
+        return None
+    spec = {"story": clean_text(raw.get("story"), 100), "point": clean_text(raw.get("point"), 100),
+            "text": clean_text(raw.get("text"), 1000)}
+    return spec if any(spec.values()) else None
+
+
+def _entry(raw: object, what_max: int, note_max: int) -> dict | None:
+    """
+    A check or a case: what it was, its result (one the runner does not know is "skipped") and its note. None
+    when it has no readable `what`.
+    """
+    what = clean_text(raw.get("what"), what_max) if isinstance(raw, dict) else ""
+    if not what:
+        return None
+    result = raw.get("result") if raw.get("result") in RESULTS else "skipped"
+    return {"what": what, "result": result, "note": clean_text(raw.get("note"), note_max)}
+
+
+def _cases(raw: object, check: str, problems: list[str]) -> list[dict] | None:
+    """
+    What a check was made of, each case with its own result: the first MAX_CASES with a readable `what`. None
+    when the agent did not list them, as against an empty list, which says none was tried. What is left out is
+    said in `problems`.
+    """
+    if not isinstance(raw, list):
+        return None
+    cases = []
+    for case in raw:
+        entry = _entry(case, 300, 300)
+        if entry is None:
+            problems.append(f"a case of the check '{check}' has no readable `what`")
+        else:
+            cases.append(entry)
+    if len(cases) > MAX_CASES:
+        dropped = [c["what"] for c in cases[MAX_CASES:]]
+        problems.append(f"the check '{check}' lists {len(cases)} cases; a run keeps {MAX_CASES}, so "
+                        f"{len(dropped)} are left out: {_left_out(dropped)}")
+    return cases[:MAX_CASES]
+
+
 def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list[str]]:
     path = folder / FINDINGS
     if folder.is_symlink() or not path.is_file() or path.is_symlink():
@@ -241,12 +302,13 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
                 problems.append(f"{FINDINGS} {said} {label}, the report has {actual[key]}")
     tested = []
     for t in raw_tested:
-        what = clean_text(t.get("what"), 300) if isinstance(t, dict) else ""
-        if not what:
+        entry = _entry(t, 300, 600)
+        if entry is None:
             problems.append("an entry of `tested` has no readable `what`")
             continue
-        result = t.get("result") if t.get("result") in RESULTS else "skipped"
-        tested.append({"what": what, "result": result, "note": clean_text(t.get("note"), 600)})
+        tested.append({**entry, "group": clean_text(t.get("group"), 200), "spec": _spec(t.get("spec")),
+                       "cases": _cases(t.get("cases"), entry["what"], problems),
+                       "finding": count(t.get("finding")) or None})
     if len(tested) > limits.checks:
         dropped = [t["what"] for t in tested[limits.checks:]]
         problems.append(f"`tested` lists {len(tested)} checks; a run keeps {limits.checks} (qa.max_checks), so "
@@ -255,6 +317,7 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
     evidence = _Evidence(folder, dest, limits)
     findings = []
     raw = raw_findings
+    number_of: dict[int, int] = {}  # the agent's numbering, across all parts, to the report's
     if any(p.get("findings") is not None and not isinstance(p.get("findings"), list) for p in parts):
         problems.append("`findings` is not a list, so what the agent found there is not known")
     for i, f in enumerate(raw[:limits.findings], 1):
@@ -283,6 +346,7 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
         url = clean_text(f.get("url"), 500)
         findings.append({
             "title": title,
+            "spec": _spec(f.get("spec")),
             "severity": f.get("severity") if f.get("severity") in SEVERITIES else "major",
             "url": url if url.startswith(("http://", "https://")) else "",
             "steps": steps,
@@ -295,10 +359,19 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
             "cause": clean_text(f.get("cause"), 2000),
             "code": code,
         })
+        number_of[i] = len(findings)
     if len(raw) > limits.findings:
         dropped = [clean_text(f.get("title"), 200) if isinstance(f, dict) else "" for f in raw[limits.findings:]]
         problems.append(f"the report has {len(raw)} findings; a run keeps {limits.findings} (qa.max_findings), so "
                         f"{len(dropped)} are left out: {_left_out([t or '(no title)' for t in dropped])}")
+    for check in tested:
+        named = check["finding"]
+        if named and check["result"] != "problem":
+            what, result = check["what"], check["result"]
+            problems.append(f"the check '{what}' is marked {result} but names finding "
+                            f"{named}, so the link is not shown")
+            named = None
+        check["finding"] = number_of.get(named) if named else None
     return {"summary": clean_text(data.get("summary"), 1500), "blocked": clean_text(data.get("blocked"), 1500),
             "tested": tested, "findings": findings}, list(dict.fromkeys(problems))
 
@@ -596,7 +669,17 @@ class QaAgent(WorkspaceRun):
                   "and what you found. The details belong in `tested` and `findings`.",
                   "- `blocked`: empty, or why you could not test at all.",
                   "- `tested`: each thing you checked, with `result` \"ok\", \"problem\", \"blocked\" or \"skipped\" "
-                  "and a `note` where it helps.",
+                  "and a `note` where it helps. `group` is the `## ` heading of its line in your plan (a user story, "
+                  "a feature, a screen). `cases` is what you actually did for it, one entry per case with its own "
+                  f"`result`, at most {MAX_CASES}: the team reads them to know what \"ok\" covers. A \"blocked\" or "
+                  "\"skipped\" check lists the cases you tried before it stopped (an empty list, if you tried none) "
+                  "and says why in `note`. A \"problem\" check names its finding by number in `finding`: its place "
+                  "in `findings`, counted across all parts (1 for the first); other checks name none.",
+                  "- `spec`, on every check and every finding: the requirement it is about, as the instructions "
+                  "give it. `story` and `point` are their numbers as the instructions number them (\"US-3\", "
+                  "\"3.2\"), `text` the requirement in the instructions' own words. When the instructions number "
+                  "nothing, leave `story` and `point` empty and quote the sentence; when they do not state it at "
+                  "all, say in `text` that it is what plain sense expects.",
                   f"- The report keeps at most {self.c.max_checks} entries of `tested`, {self.c.max_findings} "
                   f"findings and {self.c.max_files} screenshots and recordings; whatever goes past is left out, "
                   "and the report names it. Keep one entry per check all the same, never several checks in one "
