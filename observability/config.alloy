@@ -3,11 +3,11 @@
 // says whose it is; task_id travels as structured metadata, not as a label.
 
 local.file_match "runner" {
-  path_targets = [{"__path__" = "/arceus-data/events.jsonl", "source" = "runner"}]
+  path_targets = [{"__path__" = "/arceus-data/events.jsonl", "source" = "runner", "project" = sys.env("ARCEUS_PROJECT")}]
 }
 
 local.file_match "bulava" {
-  path_targets = [{"__path__" = "/bulava-state/tasks/*/events.jsonl", "source" = "bulava"}]
+  path_targets = [{"__path__" = "/bulava-state/tasks/*/events.jsonl", "source" = "bulava", "project" = sys.env("ARCEUS_PROJECT")}]
 }
 
 loki.source.file "runner" {

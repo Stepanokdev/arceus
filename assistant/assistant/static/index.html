@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factory assistant</title>
+<link rel="stylesheet" href="/assistant/static/app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <a class="brand" href="/">Arceus <span id="project">assistant</span></a>
+    <button class="linkish list-toggle" id="list-toggle" type="button" aria-controls="sidebar" aria-expanded="false">Conversations</button>
+    <div class="who"><span id="who"></span><a href="/">Console</a></div>
+  </div>
+</header>
+<div class="shell">
+  <nav class="sidebar" id="sidebar" aria-label="Conversations">
+    <button class="btn primary block" id="new-conv" type="button">New conversation</button>
+    <ul class="convs" id="convs" role="list"></ul>
+    <p class="empty-list" id="convs-empty" hidden>No conversations yet.</p>
+  </nav>
+  <main class="chat" id="chat">
+    <div class="thread" id="thread" aria-live="polite">
+      <section class="intro" id="intro">
+        <h1>Factory assistant</h1>
+        <p class="lede">Describe the client's request or the problem in your own words. The assistant will look at the code and tickets, suggest the best way to go, and help draw up the task for the factory.</p>
+      </section>
+    </div>
+    <form class="composer" id="composer">
+      <ul class="tray" id="tray" role="list" aria-label="Files for the message" hidden></ul>
+      <p class="tray-note" id="tray-note" role="alert" hidden></p>
+      <input type="file" id="file-input" multiple hidden>
+      <button class="icon-btn" id="attach" type="button" aria-label="Add a file" title="Add a file">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5 12.4 19.6a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/></svg>
+      </button>
+      <button class="icon-btn" id="mic" type="button" aria-label="Record a voice message" title="Record a voice message" aria-pressed="false">
+        <svg class="i-mic" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+        <svg class="i-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+      </button>
+      <label class="sr" for="input">Message</label>
+      <textarea id="input" rows="1" placeholder="Write a message…" autocomplete="off"></textarea>
+      <button class="btn primary" id="send" type="submit">Send</button>
+      <p class="composer-hint">Enter to send, Shift+Enter for a new line. Drag files here or paste them from the clipboard.</p>
+    </form>
+    <div class="drop" id="drop" aria-hidden="true"><p>Drop to add files</p></div>
+  </main>
+</div>
+<script src="/assistant/static/vendor/marked.min.js"></script>
+<script src="/assistant/static/vendor/purify.min.js"></script>
+<script src="/assistant/static/app.js"></script>
+</body>
+</html>
