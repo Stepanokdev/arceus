@@ -23,6 +23,7 @@ class FakeYouTrack:
         self.issue_tags: dict[str, set[str]] = {}
         self.issue_fields: dict[str, dict[str, object]] = {}
         self.comments: dict[str, list[dict]] = {}
+        self.comment_edits = 0
         self.clock = 1_792_479_600_000  # 2026-10-20 07:00 UTC in ms, the test runner's 'now'
         self.fail_once: dict[tuple[str, str], int] = {}  # (method, path) -> status, once
         self.attachments: dict[str, list[tuple[str, bytes]]] = {}  # comment id -> (file name, content)
@@ -75,6 +76,13 @@ class FakeYouTrack:
                 self.comment(db_id, self.login, json.loads(request.content)["text"])
                 c = self.comments[db_id][-1]
                 return json_response({"id": c["id"], "created": c["created"]})
+            if len(rest) == 2 and rest[0] == "comments" and method == "POST":
+                c = next((c for c in self.comments.get(db_id, []) if c["id"] == rest[1]), None)
+                if c is None:
+                    return json_response({"error": "Not Found"}, 404)
+                c["text"] = json.loads(request.content)["text"]
+                self.comment_edits += 1
+                return json_response({"id": c["id"]})
             if len(rest) == 3 and rest[0] == "comments" and rest[2] == "reactions":
                 if not any(c["id"] == rest[1] for c in self.comments.get(db_id, [])):
                     return json_response({"error": "Not Found"}, 404)
@@ -190,6 +198,10 @@ class FakeGitLab:
         self.retry_after: str | None = None
         self.requests: list[httpx.Request] = []
         self.repos = ["acme-platform", "acme-theme", "acme-infra"]
+        self.projects: dict[str, dict] = {}
+        self.merge_requests: list[tuple[int, dict]] = []
+        self.merge_refusal = ""
+        self.head_sha = ""
         self.token = {"scopes": ["api"], "expires_at": "2027-06-01", "active": True}
         self.branch_late = 0  # MR creations refused with "source_branch does not exist" before one goes through
         self.urls: dict[str, str] = {}
@@ -234,6 +246,14 @@ class FakeGitLab:
             return json_response(self.token)
         if path == "/api/v4/groups/clients%2Facme" or request.url.raw_path.startswith(b"/api/v4/groups/clients%2Facme"):
             return json_response({"id": 42, "full_path": "clients/acme"})
+        if request.url.raw_path.startswith(b"/api/v4/projects/") and b"%2F" in request.url.raw_path.split(b"?")[0]:
+            full = request.url.raw_path.split(b"?")[0][len(b"/api/v4/projects/"):].decode().replace("%2F", "/")
+            p = self.projects.get(full)
+            if p is None:
+                return json_response({"message": "404 Project Not Found"}, 404)
+            return json_response({"id": p.get("id", 100), "path": full.rsplit("/", 1)[1], "path_with_namespace": full,
+                                  "default_branch": "main", "archived": p.get("archived", False),
+                                  "http_url_to_repo": f"https://gl/{full}.git", "description": p.get("description")})
         if path == "/api/v4/groups/42/projects":
             page = int(request.url.params.get("page", 1))
             items = [{"id": i, "path": r, "path_with_namespace": f"clients/acme/{r}", "default_branch": "main",
@@ -251,7 +271,7 @@ class FakeGitLab:
             tail = parts[parts.index("merge_requests") + 2:]
             if not tail and request.method == "GET":
                 return json_response({**mr, "detailed_merge_status": mr.get("detailed_merge_status", "mergeable"),
-                                      "sha": mr.get("sha", ""), "head_pipeline": mr.get("head_pipeline")})
+                                      "sha": mr.get("sha") or self.head_sha, "head_pipeline": mr.get("head_pipeline")})
             if not tail and request.method == "PUT":
                 body = json.loads(request.content)
                 if body.pop("state_event", None) == "close":
@@ -264,6 +284,15 @@ class FakeGitLab:
                 more = len(versions) > page * n
                 return json_response(versions[(page - 1) * n:page * n],
                                      headers={"x-next-page": str(page + 1) if more else ""})
+            if tail == ["merge"] and request.method == "PUT":
+                body = json.loads(request.content)
+                self.merge_requests.append((iid, body))
+                if self.merge_refusal:
+                    return json_response({"message": self.merge_refusal}, 405)
+                if body.get("sha") and body["sha"] != mr.get("sha", body["sha"]):
+                    return json_response({"message": "SHA does not match HEAD of source branch"}, 409)
+                mr["merge_when_pipeline_succeeds"] = True
+                return json_response(mr)
             if tail == ["approvals"]:
                 return json_response({"approved_by": [{"user": {"username": u}} for u in mr.get("approved_by", [])]})
             if tail == ["approve"] and request.method == "POST":

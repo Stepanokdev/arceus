@@ -21,6 +21,8 @@ tracker:
     needs_input: agent-needs-input
     failed: agent-failed
     research: agent-research           # with the queue tag: answer the question, no MR
+    merge: agent-merge                 # with the queue tag, from someone allowed: the reviewed MRs merge once
+                                       # green (a default branch that deploys dev: "deploy to dev")
   # Tags the runner adds to / removes from the ticket at its own steps. Optional, nothing by default.
   # The tags must already exist in YouTrack; the ones in `tags:` above are not allowed here.
   # tags_on:
@@ -29,12 +31,20 @@ tracker:
   #     remove: [in development]
   #   answered:                        # research ticket (agent-research): the answer is posted, each /continue too
   #     add: [answered]
+  # Tags that name a platform, and the repositories (workspace paths) its work goes to. Every tag reaches the
+  # agent and the reviewers anyway; a tag listed here also holds back the MRs until one of its repositories changed.
+  # platforms:
+  #   android: [mobile/app-android]
+  #   ios: [mobile/app-ios]
   states:
     queued: To Do
     in_progress: In Progress
     code_review: Code Review
     # merged: Testing                  # after every MR is merged (default Testing); null: stay in Code Review
     # answered: Code Review            # after a research answer (default code_review); null: stay In Progress
+  # The comment that says the agent took a ticket keeps, while it works, a Progress section: what happens now,
+  # the agent's latest actions, the steps, the MRs. false: that comment stays as it was posted.
+  # progress_comment: true
   # YouTrack
   url: https://youtrack.example.com
   project: ACME                        # YouTrack project ID
@@ -53,6 +63,9 @@ code_host:
   url: https://gitlab.example.com
   group: clients/acme                  # every task gets all its repositories; MRs only where something changed
   include_subgroups: true
+  # Repositories in different groups: list them by full path instead of `group` (one of the two). Each one's
+  # folder in the workspace is its name, so names must differ; exclude_repos and include_subgroups do not apply.
+  # projects: [mobile/other/acme-app, backend/acme/acme-api]
   # For review_agent approvals: a second account (an author cannot approve its own MR), Developer or higher,
   # token in secrets.env. Without it the review only comments.
   # approver: { user: acme-review-bot, token_env: GITLAB_REVIEW_TOKEN }
@@ -82,6 +95,7 @@ schedule:
   poll_off_hours: 10m
   poll_local: 2m                       # local health
   poll_progress: 30s                   # a running task's steps and activity
+  progress_comment_every: 5m          # the ticket's Progress section, at most this often unless a step changed
   review_debounce: 5m
 
 http:

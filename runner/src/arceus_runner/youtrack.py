@@ -198,6 +198,11 @@ class YouTrackWriter(YouTrack):
         data = resp.json()
         return data["id"], int(data.get("created") or 0)
 
+    def update_comment(self, issue_id: str, comment_id: str, text: str) -> None:
+        """Replace the text of a comment (the bot's own): the same id, so a link to it stays good."""
+        self.c.request("POST", f"/api/issues/{quote(issue_id)}/comments/{quote(comment_id)}", params={"fields": "id"},
+                       json={"text": text})
+
     def attach_to_comment(self, issue_id: str, comment_id: str, name: str, data: bytes, mime: str) -> None:
         self.c.request("POST", f"/api/issues/{quote(issue_id)}/comments/{quote(comment_id)}/attachments",
                        params={"fields": "id,name"}, files={"file": (name, data, mime)}, timeout=UPLOAD_TIMEOUT)
@@ -293,6 +298,10 @@ class YouTrackTracker:
     def tags(self, db_id: str) -> set[str]:
         return self.api.issue_tags(db_id)
 
+    def tag_author(self, db_id: str, tag: str) -> str | None:
+        event = self.api.tag_setter(db_id, tag)
+        return event.author or None if event else None
+
     def add_tag(self, db_id: str, name: str) -> None:
         self.api.add_tag(db_id, name)
 
@@ -311,6 +320,9 @@ class YouTrackTracker:
 
     def add_comment(self, db_id: str, text: str) -> tuple[str, int]:
         return self.api.add_comment(db_id, text)
+
+    def edit_comment(self, db_id: str, comment_id: str, text: str) -> None:
+        self.api.update_comment(db_id, comment_id, text)
 
     def attachments(self, db_id: str) -> list[Attachment]:
         return self.api.attachments(db_id)

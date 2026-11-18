@@ -20,7 +20,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from arceus_runner import materials, media
+from arceus_runner import materials, media, platforms
 from arceus_runner.replies import unattributed
 from arceus_runner.config import Config
 from arceus_runner.db import REVIEW_UNDER_WAY, TaskStore, Task, TriggerDecision
@@ -35,6 +35,7 @@ from arceus_runner.integrations import (
     Issue,
     IssueDetails,
     IssueTracker,
+    MergeRequest,
     Repo,
     key_part,
 )
@@ -75,7 +76,7 @@ RESUME = "The session was interrupted (a reboot or a crash). Continue the task f
 CONTINUE = "/continue"  # a comment that starts with this, from someone allowed, resumes a failed task (_continuable)
 # Which client a journaled action goes through: one that fails holds back only its own actions (retry_pending).
 # Reactions have their own client on the code host (GitLabHost.reactions_client); the rest go to the tracker.
-ACTION_CLIENTS = {"reply": "code_host", "mr_react": "reactions"}
+ACTION_CLIENTS = {"reply": "code_host", "mr_react": "reactions", "merge": "code_host"}
 TAKEN = "eyes"  # the reaction on a command the runner took: the person sees it was seen and will be done
 
 
@@ -101,7 +102,8 @@ class Delivery:
         self.gate = Gate(self, classify)  # every text from people or CI passes it before the engine sees it
         self.workspace = Workspace(cfg, store, events, git, engine, host, now)
         self.publisher = Publisher(cfg, store, events, git, host, tracker, self.workspace, fail=self.fail,
-                                   comment_with_media=self.comment_with_media)
+                                   comment_with_media=self.comment_with_media, hold_back=self.platforms_missing,
+                                   journal_merges=self.journal_merges, arm_merges=self.arm_merges)
         self.reviewer = None  # code_review.ReviewAgent, set by the loop: told of MRs and merges (review.py)
 
     @property
@@ -147,6 +149,77 @@ class Delivery:
         self.store.action_done(key)
 
     # -- comments: once per (task, kind), even across a crash -----------------------------------
+
+
+    def journal_merges(self, task: Task, published: list[tuple[Repo, MergeRequest, str]]) -> list[tuple[str, dict]]:
+        """tracker.tags.merge on the ticket, put there by someone in allowed_users: each reviewed MR is to merge
+        once its pipeline passes (where the default branch deploys dev by itself: "deploy it to dev"). Written to
+        the action journal, one entry per published commit, before the ticket moves on (Publisher.publish), so a
+        crash or an unwell host only delays it."""
+        c = self.cfg.tracker
+        tag = c.tags.merge
+        if not published or tag not in self.tracker.tags(task.issue_db_id):
+            return []
+        who = self.tracker.tag_author(task.issue_db_id, tag)
+        if who not in c.allowed_users:
+            shas = "-".join(sha[:10] for _, _, sha in published)
+            self.events.emit("merge_refused", task_id=task.task_id, by=who or None)
+            self.comment_once(task, f"merge-refused:{shas}",
+                              f"The `{tag}` tag was put on by {who or 'someone the tracker does not name'}, who is "
+                              f"not among the people who may start the agent, so nothing was merged. The merge "
+                              f"requests wait for people as usual.")
+            return []
+        out = []
+        for repo, mr, sha in published:
+            key = f"{task.task_id}:merge:{key_part(repo.id)}:{key_part(mr.iid)}:{sha[:12]}"
+            act = self.store.action(key)
+            if act and act[0] == "done":
+                continue
+            data = {"repo_id": repo.id, "repo": repo.relative_path, "iid": mr.iid, "url": mr.url, "sha": sha,
+                    "target": repo.default_branch or "", "by": who, "tag": tag}
+            if not act:
+                self.store.action_intent(key, task.task_id, "merge", json.dumps(data))
+            out.append((key, data))
+        return out
+
+    def arm_merges(self, task: Task, merges: list[tuple[str, dict]]) -> None:
+        """The journaled merges of a publish, once the ticket is in Code Review. A host that is unwell leaves the
+        rest in the journal for retry_pending."""
+        for key, data in merges:
+            try:
+                self._arm_merge(task, key, data)
+            except ServiceError as e:
+                self.events.emit("notify_pending", task_id=task.task_id, action=key, reason=str(e))
+                break
+
+    def _arm_merge(self, task: Task, key: str, data: dict) -> None:
+        """Set one journaled MR to merge when green, after checking it is still the reviewed change into the
+        default branch. A refusal (by these checks or by the host) is final and said on the ticket; a host that is
+        unwell raises ServiceError and the journal entry waits for the next try."""
+        st = self.host.mr_status(data["repo_id"], data["iid"])
+        if st.state == "merged":
+            result = "merged"
+        elif st.state != "opened":
+            result = "refused: the merge request is closed"
+        elif not data["target"] or st.target != data["target"]:
+            result = f"refused: it merges into `{st.target}`, not the default branch `{data['target'] or '?'}`"
+        elif st.sha != data["sha"]:
+            result = "refused: it has commits the review did not see"
+        else:
+            try:
+                self.host.merge_when_green(data["repo_id"], data["iid"], data["sha"])
+                result = "set"
+            except (BadRequest, NotFound) as e:
+                result = f"refused: {str(e)[:300]}"
+        self.store.action_done(key, json.dumps({"result": result, "by": data["by"]}))
+        self.events.emit("merge_when_green" if result in ("set", "merged") else "merge_when_green_refused",
+                         task_id=task.task_id, repo=data["repo"], mr_iid=data["iid"], sha=data["sha"],
+                         detail=None if result == "set" else result)
+        said = {"set": "merges into the default branch as soon as its pipeline passes",
+                "merged": "is already merged"}.get(result, f"not set to merge ({result.removeprefix('refused: ')})")
+        self.comment_once(task, f"merge:{key_part(data['repo_id'])}:{key_part(data['iid'])}:{data['sha'][:10]}",
+                          f"Asked by {data['by']} with `{data['tag']}`: {data['url']} {said}. What the default "
+                          f"branch deploys by itself (dev) follows its merge.")
 
     def comment_once(self, task: Task, kind: str, text: str) -> tuple[str, int] | None:
         """Post a comment unless it is already there. Returns (id, created ms) of the comment."""
@@ -257,6 +330,8 @@ class Delivery:
                     self.store.action_done(key)
                 elif kind == "mr_react":
                     self.react_mr(task_id, key, data)
+                elif kind == "merge":
+                    self._arm_merge(task, key, data)
             except ServiceError as e:
                 self.events.emit("notify_pending", task_id=task_id, action=key, reason=str(e))
                 unwell.add(side)  # still unwell; the next tick tries again
@@ -343,6 +418,9 @@ class Delivery:
         parent = self._parent(details)
         files = self.ticket_files(task, None, comments)
         text = f"{task.task_id}: {details.summary}\n\n{details.description}".strip()
+        tags = self._ticket_tags(task)
+        if tags:
+            text += "\n\n" + self._tags_section(tags)
         if parent:
             text += "\n\n" + parent_section(parent)
         if comments:
@@ -366,8 +444,90 @@ class Delivery:
             self.fail(task, why)
             return
         self.publish_files(task, files, fresh=True)
+        self._remember_tags(task, tags)
         self.claim_on_ticket(task)
         self.dispatch(task, text, clearance)
+
+
+    def _ticket_tags(self, task: Task) -> list[str]:
+        """The ticket's tags as they are now, the runner's own left out."""
+        return platforms.ticket_tags(self.tracker.tags(task.issue_db_id), self.cfg.tracker.tags)
+
+    def _tags_section(self, tags: list[str], reviewer: bool = False) -> str:
+        present = [r.relative_path for r in self.workspace.group()] if self.cfg.tracker.platforms and not reviewer else []
+        return platforms.section(tags, self.cfg.tracker.platforms, present, reviewer=reviewer)
+
+    def _remember_tags(self, task: Task, tags: list[str]) -> None:
+        """The tags the agent was last told of, so a follow-up says so when people changed them."""
+        key = f"{task.task_id}:tags"
+        with self.store.transaction():
+            self.store.action_intent(key, task.task_id, "tags")
+            self.store.action_done(key, json.dumps(tags))
+
+    def _changed_tags(self, task: Task) -> tuple[str, list[str] | None]:
+        """For a follow-up: the tags section when the ticket's tags are not the ones the agent was told of, and
+        the tags to remember once the follow-up is sent ("", None when they are the same)."""
+        tags = self._ticket_tags(task)
+        known = self.store.action(f"{task.task_id}:tags")
+        told = json.loads(known[1]) if known and known[1] else []
+        if tags == told:
+            return "", None
+        if not tags:
+            return "The ticket's tags changed since you started: it has no tags now.", tags
+        return "The ticket's tags changed since you started.\n\n" + self._tags_section(tags), tags
+
+    def platforms_missing(self, task: Task, changed: set[str], attempt: int) -> bool:
+        """The ticket's tags name a platform (tracker.platforms) none of whose repositories has changes (`changed`:
+        the repositories of this round's commits and of the task's MRs): nothing is published. The first time the
+        work goes back to the agent with what is missing; after that the ticket comes back to people, who can
+        /continue it or take the tag off. True when publishing stops here (Publisher.publish asks before any push)."""
+        if not self.cfg.tracker.platforms:
+            return False
+        tags = self._ticket_tags(task)
+        gaps = platforms.missing(tags, self.cfg.tracker.platforms, changed)
+        if not gaps:
+            return False
+        what = platforms.describe_missing(gaps)
+        done = ", ".join(f"`{r}`" for r in sorted(changed))
+        self.events.emit("platforms_missing", task_id=task.task_id, attempt=attempt, missing=sorted(gaps),
+                         changed=sorted(changed))
+        key = f"{task.task_id}:platforms"
+        if not self.store.action(key):
+            sent = self._platforms_back(task, key, what, done, tags)
+            if sent != "refused":
+                return True
+        self.fail(task, "the ticket's tags name a platform the work did not change, so nothing was published",
+                  f"Tagged, with no changes: {what}.\nThe changes are in: {done}.\n"
+                  "If the ticket needs no work for that platform, take its tag off before you continue.",
+                  attempt=attempt)
+        return True
+
+    def _platforms_back(self, task: Task, key: str, what: str, done: str, tags: list[str]) -> str:
+        """The work back to the agent once, with what the tags ask: "sent", "wait" (the workspace or Bulava is
+        busy: the task stays in publishing and is looked at again) or "refused"."""
+        text = (f"The runner did not publish your work. The ticket is tagged for platforms your changes do not "
+                f"touch: {what}. You changed only {done}. Do this ticket's work for each tagged platform in its "
+                "repository, then finish as before; the work you already did stays. If a tagged platform truly "
+                "needs no change, do not finish: ask (needs_input) and say why.\n\n"
+                + self._tags_section(list(platforms.tagged_platforms(tags, self.cfg.tracker.platforms))))
+        if not self.workspace.followup_ready(task):
+            return "wait"
+        reply = self.engine.send(task_id=task.task_id, message_id=f"platforms-{task.task_id}", source="other",
+                                 author=self.cfg.tracker.bot_user, repo=Path(task.repo_path), text=text,
+                                 clearance=trusted(text), extra_dirs=self.workspace.extra_dirs_file(task))
+        if reply.rc == 6:
+            self.events.emit("send_busy", task_id=task.task_id, reason=reply.why())
+            return "wait"
+        if not reply.accepted:
+            self.events.emit("platforms_back_refused", task_id=task.task_id, reason=reply.why())
+            return "refused"
+        with self.store.transaction():
+            self.store.action_intent(key, task.task_id, "platforms")
+            self.store.action_done(key, json.dumps({"attempt": reply.data.get("attempt")}))
+            self.store.update_task(task.task_id, state="dispatched", attempt_started=self.now().isoformat())
+        self._remember_tags(task, tags)
+        self.events.emit("platforms_sent_back", task_id=task.task_id, attempt=reply.data.get("attempt"))
+        return "sent"
 
     # -- what people wrote and attached on the ticket ---------------------------------------------
 
@@ -1078,6 +1238,25 @@ class Delivery:
         self.events.emit("task_needs_input", task_id=task.task_id, question_id=q.get("id"),
                          blocked=words["blocked"], **({"review": True} if review_asked else {}))
 
+    def open_threads(self, task: Task, ref: str) -> tuple[str, list[str]]:
+        """The open MR discussions not addressed to the agent, for the comment on the ticket `ref`
+        (ReviewLoop.open_threads). Read once and kept: a retry under the same message id, or the same text waiting
+        for a security reviewer, must not change because someone wrote on the MR meanwhile."""
+        review = getattr(self, "review", None)
+        if not review:
+            return "", []
+        key = f"{task.task_id}:mr-context:{ref}"
+        kept = self.store.action(key)
+        if kept:
+            data = json.loads(kept[1] or "{}")
+            return data.get("text", ""), data.get("writers", [])
+        text, writers = review.open_threads(task)
+        payload = json.dumps({"text": text, "writers": writers})
+        with self.store.transaction():
+            self.store.action_intent(key, task.task_id, "mr_context", payload)
+            self.store.action_done(key, payload)
+        return text, writers
+
     def check_answers(self) -> None:
         """A comment from an allowed person after the question is the answer."""
         c = self.cfg.tracker
@@ -1101,11 +1280,17 @@ class Delivery:
                     continue  # the answer is read again on a later tick; the task stays in needs_input
                 files = self.ticket_files(task, {str(answer.id)}, [answer])
                 text = answer.text if answer.text.strip() else f"{answer.author} answered with files only."
+                tags, new_tags = self._changed_tags(task)
+                if tags:
+                    text += f"\n\n{tags}"
+                threads, writers = self.open_threads(task, f"answer:{answer.id}")
+                if threads:
+                    text += f"\n{threads}"
                 if files:
                     text, files = materials.with_section(
                         text, files, self._files_folder(task),
                         [(f"the answer by {answer.author}", str(answer.id), answer.text)])
-                clearance = self.gate.clear(task, "answer", text, authors=[answer.author,
+                clearance = self.gate.clear(task, "answer", text, authors=[answer.author, *writers,
                                                                            *(m.attachment.author for m in files)],
                                             resume_state="needs_input", files=materials.screen_files(files))
                 if clearance is None or not self.workspace.followup_ready(task):
@@ -1127,6 +1312,8 @@ class Delivery:
                                              text=text, clearance=clearance,
                                              extra_dirs=self.workspace.extra_dirs_file(task))
                 if self._after_send(task, reply, "answer_sent", untag=c.tags.needs_input, author=answer.author):
+                    if new_tags is not None:
+                        self._remember_tags(task, new_tags)
                     if hasattr(self.store, "consume_signal"):
                         self.store.consume_signal(f"yt-{answer.id}", task.task_id, "ticket", answer.author,
                                                   answer.text, self.now().isoformat(), "answer")
@@ -1224,12 +1411,18 @@ class Delivery:
         files = self.ticket_files(task, {asked.id}, [asked])
         if data.get("text"):
             text += f"\n\n{data['text']}"
+        tags, new_tags = self._changed_tags(task)
+        if tags:
+            text += f"\n\n{tags}"
+        threads, writers = self.open_threads(task, key)
+        if threads:
+            text += f"\n{threads}"
         if files:
             text, files = materials.with_section(
                 text, files, self._files_folder(task),
                 [(f"the request by {data['author']}", asked.id, data.get("text") or "")])
-        if data.get("text") or files:
-            clearance = self.gate.clear(task, "continue", text, authors=[data["author"],
+        if data.get("text") or files or tags or threads:
+            clearance = self.gate.clear(task, "continue", text, authors=[data["author"], *writers,
                                                                          *(m.attachment.author for m in files)],
                                         resume_state=task.state, ref=key, files=materials.screen_files(files))
             if clearance is None:
@@ -1241,6 +1434,8 @@ class Delivery:
                                  source=self.tracker.engine_source, author=data["author"], repo=Path(task.repo_path),
                                  text=text, clearance=clearance, extra_dirs=self.workspace.extra_dirs_file(task))
         if reply.accepted:  # dispatched, or a duplicate of what Bulava took before a crash
+            if new_tags is not None:
+                self._remember_tags(task, new_tags)
             self._resumed(task, key, data, state="dispatched", attempt=reply.data.get("attempt"))
         elif reply.rc == 6:
             self.events.emit("send_busy", task_id=task.task_id, reason=reply.why())

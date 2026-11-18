@@ -128,6 +128,7 @@ class IssueTracker(Protocol):
     (reads_attachments False or missing: the agent works from the ticket's text and comments only);
     in_state (missing: the code review answers only on tickets whose merge requests the runner opened);
     react (missing: a command the runner took gets no reaction, only what follows from it).
+    edit_comment (missing: the comment that says the agent took a ticket is not kept up to date).
     """
 
     name: str            # the service in health checks, metrics and events: "youtrack"
@@ -165,6 +166,10 @@ class IssueTracker(Protocol):
 
     def tags(self, db_id: str) -> set[str]: ...
 
+    def tag_author(self, db_id: str, tag: str) -> str | None:
+        """Who put `tag` on the issue most recently, from the tracker's own history; None when it does not say.
+        The same security boundary as trigger(): never the reporter, the assignee or the last editor."""
+
     def add_tag(self, db_id: str, name: str) -> None:
         """Idempotent: a tag already there is left as it is."""
 
@@ -183,6 +188,10 @@ class IssueTracker(Protocol):
 
     def add_comment(self, db_id: str, text: str) -> tuple[str, int]:
         """Post a Markdown comment as the bot; returns its (id, created ms)."""
+
+    def edit_comment(self, db_id: str, comment_id: str, text: str) -> None:
+        """Replace the text of one of the bot's own comments, keeping its id. Optional: ticket_progress.py keeps
+        the comment that says the agent took the ticket up to date with it."""
 
     def attachments(self, db_id: str) -> list[Attachment]:
         """Every file on the issue and on its comments, oldest first, removed ones left out. Only called
@@ -272,6 +281,7 @@ class Note:
     line: int | None
     url: str
     commit: str | None = None  # the version of the merge request a diff comment was written on
+    resolved: bool = False
 
 
 @dataclass(frozen=True)
@@ -367,6 +377,10 @@ class CodeHost(Protocol):
     def description(self, repo_id: Id, iid: Id) -> str: ...
 
     def set_description(self, repo_id: Id, iid: Id, description: str) -> None: ...
+
+    def merge_when_green(self, repo_id: Id, iid: Id, sha: str) -> None:
+        """Merge the MR once its pipeline passes (at once if it already has), only while its head is `sha`.
+        Raises ServiceError when the host refuses (conflicts, a draft, no right to merge)."""
 
     def note_mr(self, repo_id: Id, iid: Id, body: str) -> None:
         """A plain comment on the merge request."""

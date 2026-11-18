@@ -761,7 +761,6 @@ def test_no_new_work_while_claude_is_signed_out(w):
     assert len(w.calls("dispatch")) == 1
 
 
-
 # -- the whole group, no repository in the ticket ------------------------------------------------
 
 def test_every_repository_of_the_group_is_open_to_the_agent(w):
@@ -1010,7 +1009,6 @@ def test_metrics_show_the_current_picture(w):
     assert 'runner_service_up{role="code_host",service="gitlab"} 1.0' in text
 
 
-
 def test_commits_pushed_on_top_of_the_reviewed_one_are_named_not_overwritten(w):
     take(w)
     reviewed = w.agent_commits("a.txt")
@@ -1055,7 +1053,6 @@ def test_a_branch_the_agent_already_pushed_is_not_pushed_again(w):
     w.tick()
     assert w.remote_branch(w.store.task("ACME-1").branch) == sha
     assert len(w.gl.mrs) == 1 and w.store.task("ACME-1").state == "code_review"
-
 
 
 # -- requirements found missing on review ----------------------------------------------------------
@@ -1122,7 +1119,6 @@ def test_gitlab_token_expiry_is_watched_while_running(w):
     w.gl.token = {"scopes": ["api"], "expires_at": "2026-10-01"}
     take(w)
     assert w.runner.health["gitlab.token_expiry"] == "fail" and w.calls("dispatch") == []
-
 
 
 def test_usage_readings_are_refreshed_before_the_doctor(w):
@@ -1734,3 +1730,105 @@ def test_a_screenshot_shown_with_the_question_is_not_attached_again_when_the_wor
     assert attached == ["email.png", "final.png"]  # each file on the ticket once
     desc = w.gl.mrs[0]["description"]
     assert "![Admin email, draft](/uploads/" in desc and "![Admin email, final](/uploads/" in desc
+
+
+def _merge_tag(w, who: str) -> None:
+    w.yt.issue_tags["2-1"].add("agent-merge")
+    w.yt.activities["2-1"].append({"id": "m1", "timestamp": 99, "author": {"login": who},
+                                   "added": [{"name": "agent-merge"}], "removed": []})
+
+
+def test_the_merge_tag_sets_the_reviewed_mr_to_merge_when_green(w):
+    take(w)
+    _merge_tag(w, "j.doe")
+    sha = w.agent_commits()
+    w.gl.head_sha = sha
+    w.settle("ACME-1", "waiting_review")
+    w.tick()
+    assert w.store.task("ACME-1").state == "code_review"
+    [(iid, body)] = w.gl.merge_requests
+    assert iid == w.gl.mrs[0]["iid"] and body["sha"] == sha
+    assert body["auto_merge"] is True and body["merge_when_pipeline_succeeds"] is True
+    assert any("as soon as its pipeline passes" in t and "j.doe" in t for t in w.bot_comments())
+    assert w.events_named("merge_when_green")
+    w.tick()
+    assert len(w.gl.merge_requests) == 1
+
+
+def test_no_merge_without_the_tag(w):
+    take(w)
+    w.agent_commits()
+    w.settle("ACME-1", "waiting_review")
+    w.tick()
+    assert w.store.task("ACME-1").state == "code_review" and w.gl.merge_requests == []
+
+
+def test_the_merge_tag_from_someone_not_allowed_merges_nothing(w):
+    take(w)
+    _merge_tag(w, "stranger")
+    w.agent_commits()
+    w.settle("ACME-1", "waiting_review")
+    w.tick()
+    assert w.gl.merge_requests == []
+    assert any("stranger" in t and "nothing was merged" in t for t in w.bot_comments())
+    assert w.events_named("merge_refused")
+
+
+def test_a_refused_merge_is_said_on_the_ticket(w):
+    take(w)
+    _merge_tag(w, "j.doe")
+    w.gl.head_sha = w.agent_commits()
+    w.settle("ACME-1", "waiting_review")
+    w.gl.merge_refusal = "Branch cannot be merged"
+    w.tick()
+    assert w.store.task("ACME-1").state == "code_review" and len(w.gl.merge_requests) == 1
+    assert any("not set to merge" in t and "Branch cannot be merged" in t for t in w.bot_comments())
+    assert w.events_named("merge_when_green_refused")
+    w.tick()
+    assert len(w.gl.merge_requests) == 1
+
+
+def test_an_mr_with_commits_the_review_did_not_see_is_not_merged(w):
+    take(w)
+    _merge_tag(w, "j.doe")
+    w.agent_commits()
+    w.gl.head_sha = "f" * 40
+    w.settle("ACME-1", "waiting_review")
+    w.tick()
+    assert w.gl.merge_requests == []
+    assert any("commits the review did not see" in t for t in w.bot_comments())
+
+
+def test_an_mr_into_another_branch_is_not_merged(w):
+    take(w)
+    _merge_tag(w, "j.doe")
+    w.gl.head_sha = w.agent_commits()
+    w.settle("ACME-1", "waiting_review")
+    real = w.runner.delivery.host.mr_status
+    w.runner.delivery.host.mr_status = lambda repo_id, iid: __import__("dataclasses").replace(
+        real(repo_id, iid), target="release/1.2")
+    w.tick()
+    assert w.gl.merge_requests == []
+    assert any("not the default branch" in t for t in w.bot_comments())
+
+
+def test_a_merge_the_host_could_not_take_now_is_tried_again(w):
+    take(w)
+    _merge_tag(w, "j.doe")
+    w.gl.head_sha = w.agent_commits()
+    w.settle("ACME-1", "waiting_review")
+    host = w.runner.delivery.host
+    real = host.merge_when_green
+    calls = []
+
+    def unwell_once(*a):
+        calls.append(a)
+        if len(calls) == 1:
+            from arceus_runner.http import ServiceError
+            raise ServiceError("gitlab", "503 Service Unavailable", 503)
+        return real(*a)
+    host.merge_when_green = unwell_once
+    w.tick()
+    assert w.store.task("ACME-1").state == "code_review" and w.gl.merge_requests == []
+    w.tick()
+    assert len(w.gl.merge_requests) == 1 and len(calls) == 2

@@ -70,6 +70,7 @@ from arceus_runner.http import AuthError, NotFound, ServiceError
 from arceus_runner.integrations import Approval, Comment, Issue, IssueDetails, MRStatus, key_part
 from arceus_runner.replies import decisions_file, unattributed
 from arceus_runner.screening import is_decision, trusted
+from arceus_runner.ticket_progress import SEPARATOR as PROGRESS_SEPARATOR
 
 REVIEWS_DIR = Path(".arceus") / "reviews"
 BRANCH_PREFIX = "arceus-review/"
@@ -1609,11 +1610,16 @@ class ReviewAgent:
         if row.request:
             lines += [f"What {row.author} asked of the review: {row.request}", ""]
         lines += ["## The ticket", "", f"{issue.key}: {issue.summary}", "", issue.description.strip() or "(no description)",
-                  "", "## Comments on the ticket, oldest first", ""]
+                  ""]
+        tags = self.d._tags_section(self.d._ticket_tags(task), reviewer=True)
+        if tags:
+            lines += [tags, ""]
+        lines += ["## Comments on the ticket, oldest first", ""]
         shown = [x for x in comments if x.text.strip()]
         for x in shown:
             who = "Arceus (the runner)" if x.author == bot else x.author
-            body = _TRACKER_MARK.sub("", x.text).strip().replace("\n", "\n  ")
+            text = x.text.split(PROGRESS_SEPARATOR, 1)[0] if x.author == bot else x.text
+            body = _TRACKER_MARK.sub("", text).strip().replace("\n", "\n  ")
             lines.append(f"- {who}, {_when(x.created)}: {body}")
         if not shown:
             lines.append("(none)")

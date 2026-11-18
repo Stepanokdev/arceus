@@ -114,10 +114,11 @@ class TrackerTags(Strict):
     # Next to the queue tag when the ticket is taken: a question to answer on the ticket, no merge request.
     # Who may start the agent is still read from the queue tag alone.
     research: str = "agent-research"
+    merge: str = "agent-merge"
 
     @model_validator(mode="after")
     def _distinct(self) -> TrackerTags:
-        names = [self.queue, self.needs_input, self.failed, self.research]
+        names = [self.queue, self.needs_input, self.failed, self.research, self.merge]
         if len(set(names)) != len(names):
             raise ValueError(f"tags must be different, got {names}")
         return self
@@ -193,12 +194,33 @@ class IssueTrackerConfig(Strict):
     token_env: str  # name of the variable in secrets.env; each provider has its own default
     bot_user: str = Field(min_length=1)  # the bot's login: its own comments are never read as people's
     allowed_users: list[str] = Field(min_length=1)  # tracker logins who may start the agent with the queue tag
+    platforms: dict[str, list[str]] = {}
     tags: TrackerTags = TrackerTags()
     tags_on: TagsOn = TagsOn()
     states: TrackerStates
+    progress_comment: bool = True
 
     _gone = _refuse_gone("tracker")
     _check_env = field_validator("token_env")(_env_name)
+
+    @model_validator(mode="after")
+    def _platforms(self) -> IssueTrackerConfig:
+        from arceus_runner.platforms import runner_tags
+        own = runner_tags(self.tags)
+        seen: set[str] = set()
+        for name, repos in self.platforms.items():
+            key = name.strip().lower()
+            if not key or key != name.lower():
+                raise ValueError(f"tracker.platforms: {name!r} is not a tag name")
+            if key in own:
+                raise ValueError(f"tracker.platforms: {name!r} is one of the runner's own tags")
+            if key in seen:
+                raise ValueError(f"tracker.platforms: {name!r} is given twice")
+            seen.add(key)
+            if not repos or any(not r.strip() or r.strip() != r or r.startswith("/") for r in repos):
+                raise ValueError(f"tracker.platforms.{name}: a list of repository paths in the workspace "
+                                 f"(as `mobile/app-ios`), got {repos!r}")
+        return self
 
     @model_validator(mode="after")
     def _users(self) -> IssueTrackerConfig:
@@ -211,7 +233,7 @@ class IssueTrackerConfig(Strict):
     @model_validator(mode="after")
     def _own_tags(self) -> IssueTrackerConfig:
         # The runner's own tags drive what it does: the queue tag on a merged ticket would take it again.
-        own = {self.tags.queue, self.tags.needs_input, self.tags.failed, self.tags.research}
+        own = {self.tags.queue, self.tags.needs_input, self.tags.failed, self.tags.research, self.tags.merge}
         for step in TagsOn.model_fields:
             clash = sorted(own & set(getattr(self.tags_on, step).names))
             if clash:
@@ -350,6 +372,7 @@ class Schedule(Strict):
     poll_off_hours: Duration = timedelta(minutes=10)
     poll_local: Duration = timedelta(minutes=2)
     poll_progress: Duration = timedelta(seconds=30)  # engine steps and agent activity: local files only
+    progress_comment_every: Duration = timedelta(minutes=5)
     review_debounce: Duration = timedelta(minutes=5)
 
     _accept_old = _accept_retired("schedule", ("repo_sync",))
