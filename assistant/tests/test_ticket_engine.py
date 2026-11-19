@@ -158,6 +158,11 @@ def chat(tmp_path, monkeypatch, bridge, engine=True):
     monkeypatch.setattr(server.Client, "__init__", lambda self, c, transport=None:
                         real(self, c, httpx.MockTransport(fake_yt)))
     monkeypatch.setattr(server, "TicketEngine", lambda c: TicketEngine(c, run=bridge))
+
+    async def no_loop(self):
+        """These tests step the engine themselves. A real loop would run its own step in a worker thread beside
+        theirs, and cancelling it doesn't stop a step already running there: two steps, two dispatches."""
+    monkeypatch.setattr(server.App, "_ticket_loop", no_loop)
     client = TestClient(server.build(s))
     return client, s
 
@@ -179,7 +184,6 @@ def test_a_ticket_codex_accepted_replaces_her_brief(tmp_path, monkeypatch):
     client, s = chat(tmp_path, monkeypatch, bridge)
     with client:
         app, cid, d = proposed(client, s)
-        app._ticket_task.cancel()
         r = client.get(f"/assistant/api/drafts/{d.id}", headers=H).json()
         assert r["state"] == "preparing" and r["checked"] is None
         assert client.post(f"/assistant/api/drafts/{d.id}/create", headers=H).status_code == 409
@@ -211,7 +215,6 @@ def test_codex_objections_are_shown_under_the_ticket(tmp_path, monkeypatch):
     client, s = chat(tmp_path, monkeypatch, bridge)
     with client:
         app, cid, d = proposed(client, s)
-        app._ticket_task.cancel()
         app.ticket_step()
         bridge.finish(f"fa-{cid[:12]}-{d.id}", review="failed", why=REVIEW_FAIL)
         app.ticket_step()
@@ -227,7 +230,6 @@ def test_when_night_shift_cannot_her_brief_stays_marked_unchecked(tmp_path, monk
     client, s = chat(tmp_path, monkeypatch, bridge)
     with client:
         app, cid, d = proposed(client, s)
-        app._ticket_task.cancel()
         app.ticket_step()
         got = app.store.draft(d.id)
         assert got.state == "draft" and got.checked == "unchecked" and "the check is not connected yet" in got.review_notes
@@ -239,7 +241,6 @@ def test_nothing_written_or_a_dead_session_or_too_long_fall_back(tmp_path, monke
     client, s = chat(tmp_path, monkeypatch, bridge)
     with client:
         app, cid, d1 = proposed(client, s)
-        app._ticket_task.cancel()
         app.ticket_step()
         t1 = f"fa-{cid[:12]}-{d1.id}"
         bridge.finish(t1, review="failed", why="", state="failed", write=False)
@@ -266,7 +267,6 @@ def test_one_ticket_at_a_time_and_busy_waits(tmp_path, monkeypatch):
     with client:
         app, cid, d1 = proposed(client, s)
         _, cid2, d2 = proposed(client, s)
-        app._ticket_task.cancel()
         app.ticket_step()
         assert app.store.draft(d1.id).prep_task is None and app.store.draft(d1.id).state == "preparing"
         app.ticket_step()
@@ -281,14 +281,12 @@ def test_a_restart_mid_ticket_carries_on_with_the_same_task(tmp_path, monkeypatc
     client, s = chat(tmp_path, monkeypatch, bridge)
     with client:
         app, cid, d = proposed(client, s)
-        app._ticket_task.cancel()
         app.ticket_step()
     tid = f"fa-{cid[:12]}-{d.id}"
     bridge.finish(tid)
     client2 = TestClient(server.build(s))
     with client2:
         app2 = client2.app.state.app
-        app2._ticket_task.cancel()
         app2.ticket_step()
         assert app2.store.draft(d.id).checked == "passed"
     assert [c[0] for c in bridge.calls].count("dispatch") == 1
@@ -299,7 +297,6 @@ def test_a_draft_put_aside_while_it_is_written_stays_aside(tmp_path, monkeypatch
     client, s = chat(tmp_path, monkeypatch, bridge)
     with client:
         app, cid, d = proposed(client, s)
-        app._ticket_task.cancel()
         app.ticket_step()
         assert client.post(f"/assistant/api/drafts/{d.id}/dismiss", headers=H).json()["state"] == "dismissed"
         bridge.finish(f"fa-{cid[:12]}-{d.id}")
@@ -484,7 +481,6 @@ def test_a_finding_comes_back_as_her_message(tmp_path, monkeypatch):
     client, s, prompts = investigation_chat(tmp_path, monkeypatch, bridge)
     with client:
         app = client.app.state.app
-        app._ticket_task.cancel()
         cid, inv = asked(app)
         app.ticket_step()
         tid = f"fi-{cid[:12]}-{inv.id}"
@@ -511,7 +507,6 @@ def test_a_failed_investigation_is_said_plainly(tmp_path, monkeypatch):
     client, s, prompts = investigation_chat(tmp_path, monkeypatch, bridge, answer="Couldn't dig deeper right now, here is what I see.")
     with client:
         app = client.app.state.app
-        app._ticket_task.cancel()
         cid, inv = asked(app)
         drive(client, app, lambda: app.store.investigation(inv.id).state == "told")
         assert "didn't work out" in prompts[-1] and "the check is not connected yet" in prompts[-1]
@@ -523,7 +518,6 @@ def test_she_waits_while_someone_is_talking_and_tickets_and_inquiries_share_the_
     client, s, prompts = investigation_chat(tmp_path, monkeypatch, bridge)
     with client:
         app = client.app.state.app
-        app._ticket_task.cancel()
         _, cid_t, d = proposed(client, s)
         cid, inv = asked(app)
         app.ticket_step()
@@ -548,7 +542,6 @@ def test_a_restart_keeps_what_was_found(tmp_path, monkeypatch):
     client, s, prompts = investigation_chat(tmp_path, monkeypatch, bridge)
     with client:
         app = client.app.state.app
-        app._ticket_task.cancel()
         cid, inv = asked(app)
         app.ticket_step()
         tid = app.store.investigation(inv.id).prep_task
@@ -557,7 +550,6 @@ def test_a_restart_keeps_what_was_found(tmp_path, monkeypatch):
     client2 = TestClient(server.build(s))
     with client2:
         app2 = client2.app.state.app
-        app2._ticket_task.cancel()
         drive(client2, app2, lambda: app2.store.investigation(inv.id).state == "told")
         assert [c[0] for c in bridge.calls].count("dispatch") == 1 and len(prompts) == 1
 
@@ -579,7 +571,6 @@ def test_a_failed_telling_keeps_the_finding_and_retry_tells_it(tmp_path, monkeyp
     monkeypatch.setattr(server, "run_turn", run)
     with client:
         app = client.app.state.app
-        app._ticket_task.cancel()
         cid, inv = asked(app)
         app.ticket_step()
         tid = app.store.investigation(inv.id).prep_task
@@ -604,7 +595,6 @@ def test_a_failed_telling_keeps_the_finding_and_retry_tells_it(tmp_path, monkeyp
     client2 = TestClient(server.build(s))
     with client2:
         app2 = client2.app.state.app
-        app2._ticket_task.cancel()
         assert client2.post(f"/assistant/api/conversations/{cid}/retry", headers=H).status_code == 202
         drive(client2, app2, lambda: app2.store.investigation(inv.id).state == "told")
         assert app2.store.messages(cid)[-1].text == "Found it: the card styling hides the button."
