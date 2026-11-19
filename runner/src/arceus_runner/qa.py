@@ -134,11 +134,21 @@ class Limits:
     files: int = 1000
     report_bytes: int = 8 * 1024 * 1024
     media_bytes: int = 1024 * 1024 * 1024
+    note_chars: int = 1500
+    summary_chars: int = 1500
+    blocked_chars: int = 1500
+    step_chars: int = 500
+    expected_chars: int = 1500
+    cause_chars: int = 2000
+    spec_chars: int = 1000
 
     @classmethod
     def of(cls, c) -> Limits:
         return cls(checks=c.max_checks, findings=c.max_findings, files=c.max_files,
-                   report_bytes=c.max_report_mb * 1024 * 1024, media_bytes=c.max_media_mb * 1024 * 1024)
+                   report_bytes=c.max_report_mb * 1024 * 1024, media_bytes=c.max_media_mb * 1024 * 1024,
+                   note_chars=c.max_note_chars, summary_chars=c.max_summary_chars,
+                   blocked_chars=c.max_blocked_chars, step_chars=c.max_step_chars,
+                   expected_chars=c.max_expected_chars, cause_chars=c.max_cause_chars, spec_chars=c.max_spec_chars)
 
 
 def plan_progress(path: Path) -> dict:
@@ -206,7 +216,7 @@ def report_parts(folder: Path) -> list[str]:
     return names
 
 
-def _spec(raw: object) -> dict | None:
+def _spec(raw: object, text_max: int) -> dict | None:
     """
     The requirement a check or finding is about, as the instructions number and word it: its story, its point
     and its text. None when the agent named none of them.
@@ -214,7 +224,7 @@ def _spec(raw: object) -> dict | None:
     if not isinstance(raw, dict):
         return None
     spec = {"story": clean_text(raw.get("story"), 100), "point": clean_text(raw.get("point"), 100),
-            "text": clean_text(raw.get("text"), 1000)}
+            "text": clean_text(raw.get("text"), text_max)}
     return spec if any(spec.values()) else None
 
 
@@ -230,7 +240,7 @@ def _entry(raw: object, what_max: int, note_max: int) -> dict | None:
     return {"what": what, "result": result, "note": clean_text(raw.get("note"), note_max)}
 
 
-def _cases(raw: object, check: str, notes: list[str]) -> list[dict] | None:
+def _cases(raw: object, check: str, notes: list[str], note_max: int) -> list[dict] | None:
     """
     What a check was made of, each case with its own result: those with a readable `what`. None when the agent
     did not list them, as against an empty list, which says none was tried. A case left out is said in `notes`.
@@ -239,7 +249,7 @@ def _cases(raw: object, check: str, notes: list[str]) -> list[dict] | None:
         return None
     cases = []
     for case in raw:
-        entry = _entry(case, 300, 300)
+        entry = _entry(case, 300, note_max)
         if entry is None:
             notes.append(f"a case of the check '{check}' has no readable `what`")
         else:
@@ -296,12 +306,13 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
                 problems.append(f"{FINDINGS} {said} {label}, the report has {actual[key]}")
     tested = []
     for t in raw_tested:
-        entry = _entry(t, 300, 600)
+        entry = _entry(t, 300, limits.note_chars)
         if entry is None:
             problems.append("an entry of `tested` has no readable `what`")
             continue
-        tested.append({**entry, "group": clean_text(t.get("group"), 200), "spec": _spec(t.get("spec")),
-                       "cases": _cases(t.get("cases"), entry["what"], notes),
+        tested.append({**entry, "group": clean_text(t.get("group"), 200),
+                       "spec": _spec(t.get("spec"), limits.spec_chars),
+                       "cases": _cases(t.get("cases"), entry["what"], notes, limits.note_chars),
                        "finding": count(t.get("finding")) or None})
     if len(tested) > limits.checks:
         dropped = [t["what"] for t in tested[limits.checks:]]
@@ -319,7 +330,7 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
         if not title:
             problems.append(f"finding {i} has no readable title")
             continue
-        steps = [clean_text(s, 500) for s in f.get("steps") if clean_text(s, 500)][:MAX_STEPS] \
+        steps = [t for t in (clean_text(s, limits.step_chars) for s in f.get("steps")) if t][:MAX_STEPS] \
             if isinstance(f.get("steps"), list) else []
         failed = count(f.get("failed_step"))
         shots = []
@@ -340,18 +351,18 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
         url = clean_text(f.get("url"), 500)
         findings.append({
             "title": title,
-            "spec": _spec(f.get("spec")),
+            "spec": _spec(f.get("spec"), limits.spec_chars),
             "severity": f.get("severity") if f.get("severity") in SEVERITIES else "major",
             "type": qa_report.type_of(f),
             "url": url if url.startswith(("http://", "https://")) else "",
             "steps": steps,
             "failed_step": failed if failed and failed <= len(steps) else None,
-            "expected": clean_text(f.get("expected"), 1500),
-            "actual": clean_text(f.get("actual"), 1500),
+            "expected": clean_text(f.get("expected"), limits.expected_chars),
+            "actual": clean_text(f.get("actual"), limits.expected_chars),
             "evidence": shots,
             "reproduced": count(f.get("reproduced")),
             "attempts": count(f.get("attempts")),
-            "cause": clean_text(f.get("cause"), 2000),
+            "cause": clean_text(f.get("cause"), limits.cause_chars),
             "code": code,
         })
         number_of[i] = len(findings)
@@ -367,7 +378,8 @@ def _load_findings(folder: Path, dest: Path, limits: Limits) -> tuple[dict, list
         elif named and check["finding"] is None:
             notes.append(f"the check '{what}' names finding {named}, but finding {named} is not in the report, "
                          "so the link is not shown")
-    return {"summary": clean_text(data.get("summary"), 1500), "blocked": clean_text(data.get("blocked"), 1500),
+    return {"summary": clean_text(data.get("summary"), limits.summary_chars),
+            "blocked": clean_text(data.get("blocked"), limits.blocked_chars),
             "tested": tested, "findings": findings, "notes": list(dict.fromkeys(notes))}, \
         list(dict.fromkeys(problems))
 
