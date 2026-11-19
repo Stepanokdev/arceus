@@ -631,6 +631,13 @@ class QaConfig(Strict):
     max_files: int = Field(default=1000, ge=1, le=10_000)     # screenshots and recordings
     max_report_mb: int = Field(default=8, ge=1, le=64)        # findings.json itself
     max_media_mb: int = Field(default=1024, ge=1, le=20_480)  # all screenshots and recordings together
+    max_note_chars: int = Field(default=1500, ge=50, le=50_000)      # a check's or case's note: why it was blocked
+    max_summary_chars: int = Field(default=1500, ge=50, le=50_000)   # the run's summary on the report
+    max_blocked_chars: int = Field(default=1500, ge=50, le=50_000)   # why the agent could not test at all
+    max_step_chars: int = Field(default=500, ge=50, le=50_000)       # one step to reproduce a finding
+    max_expected_chars: int = Field(default=1500, ge=50, le=50_000)  # a finding's expected and actual, each
+    max_cause_chars: int = Field(default=2000, ge=50, le=50_000)     # a finding's likely cause
+    max_spec_chars: int = Field(default=1000, ge=50, le=50_000)      # the requirement's quoted text
     address: str = "127.0.0.1"            # the reports page; never open it outside
     port: int = Field(default=3300, ge=0, le=65535)  # 0: any free port (tests). Loki has 3100, Grafana 3000
 

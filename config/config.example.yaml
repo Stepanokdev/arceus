@@ -182,6 +182,13 @@ qa:
   # max_files: 1000                                # screenshots and recordings
   # max_report_mb: 8                               # the agent's findings.json
   # max_media_mb: 1024                             # screenshots and recordings together
+  # max_note_chars: 1500                           # a check's or case's note: why it was blocked or skipped
+  # max_summary_chars: 1500
+  # max_blocked_chars: 1500                        # why the agent could not test at all
+  # max_step_chars: 500                            # one step to reproduce a finding
+  # max_expected_chars: 1500                       # a finding's expected and actual, each
+  # max_cause_chars: 2000
+  # max_spec_chars: 1000                           # the requirement's quoted text
   port: 3300                                       # 127.0.0.1 only
 
 # Optional. The agent reviews the architecture and reports what needs a decision (docs/architect.md).
