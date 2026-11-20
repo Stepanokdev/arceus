@@ -100,6 +100,11 @@ def read_instructions(path: Path, required: bool = True) -> tuple[str | None, st
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return None, f"the instructions file {path} is not UTF-8 text"
+    return instructions_text(text, path, required)
+
+
+def instructions_text(text: str, path: Path, required: bool = True) -> tuple[str | None, str]:
+    """read_instructions for a text already in hand, such as a draft the console checks before saving."""
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S).strip()
     if not text:
         return (None, f"the instructions file {path} is empty (comments only)") if required else ("", "")

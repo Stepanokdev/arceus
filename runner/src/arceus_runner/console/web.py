@@ -225,7 +225,8 @@ def same_origin(request: Request, settings: Settings) -> bool:
 
 # The bar at the top: address, words, who sees it. Only the sections this console serves are shown.
 SECTIONS = [("/", "Home", "view"), ("/tasks/", "Tasks", "view"), ("/qa/", "Test runs", "view"), ("/architecture/", "Architecture", "view"),
-            ("/secops/", "Advisory triage", "view"), ("/grafana/", "Monitoring", "view"),
+            ("/secops/", "Advisory triage", "view"), ("/instructions/", "Instructions", "instructions.view"),
+            ("/grafana/", "Monitoring", "view"),
             ("/settings/", "Settings", "settings.view"), ("/operations/", "Operations", "ops.view"),
             ("/users/", "People", "users.manage")]
 
@@ -375,13 +376,13 @@ async def healthz(_request: Request) -> Response:
 
 
 def create_app(settings: Settings | None = None) -> Starlette:
-    from arceus_runner.console import (views_arch, views_assistant, views_auth, views_home, views_ops, views_qa,
-                                       views_secops, views_settings, views_tasks, views_users)
+    from arceus_runner.console import (views_arch, views_assistant, views_auth, views_home, views_instructions,
+                                       views_ops, views_qa, views_secops, views_settings, views_tasks, views_users)
     settings = settings or Settings.from_env()
     console = ConsoleApp(settings)
     routes = [Route("/static/{name}", static), Route("/healthz", healthz)]
-    for module in (views_auth, views_home, views_tasks, views_qa, views_arch, views_secops, views_assistant,
-                   views_settings, views_ops, views_users):
+    for module in (views_auth, views_home, views_tasks, views_qa, views_arch, views_secops, views_instructions,
+                   views_assistant, views_settings, views_ops, views_users):
         routes += module.routes()
         console.sections.update(getattr(module, "SECTIONS", ()))
     app = Starlette(routes=routes)

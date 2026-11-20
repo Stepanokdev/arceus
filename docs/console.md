@@ -255,7 +255,41 @@ links into the code at the commit read, and whether each went to the register. T
 false or the runner's mode starts nothing.
 
 It is for reading only. A run is started with `arceus-runner secops run` or by `secops.schedule` and stopped with
-`secops stop`, on the server, and the team's notes on its stack are edited there too.
+`secops stop`, on the server. The team's notes on its stack are edited under **Instructions**.
+
+## Instructions
+
+**Instructions** lists every text the agents are given besides the runner's own rules: the project's notes, each test
+scenario's instructions, the architecture review's, the advisory triage's notes and the server's notes. Each says what
+it is for, who reads it and when, who edits it, its file, and whether the agent can be given what it holds now (its
+bytes against the runner's limit, how many are left, or why not). The list names files and their state, never their
+text: a test scenario's holds the test accounts. QA, architects, operators and admins see it.
+
+The project's notes (`/instructions/project-notes/`) and the advisory triage's notes (`/instructions/secops/`) are
+edited here by admins, in the same editor as the test and review instructions (whose own pages the list links to): a
+save over a version that changed meanwhile is refused with the difference, every saved version is kept with who saved
+it and opens again as a draft. Every editor checks the text by its reader's own rules before it writes: the project's
+notes by `texts.project_notes` (16 KB without comments), the instructions by `read_instructions` (64 KB; required for
+a test scenario). A text the runner would refuse is not saved, so a save from the console never stops the next task or
+run; the person's text stays in the editor with the reason. A task reads the project's notes when it first starts and
+keeps its copy, so a save reaches the next task and leaves the ones under way alone. With `paths.project_notes` not set
+there is nothing to edit, and the page says how to set it.
+
+The console keeps no copy of its own: it edits the file the runner reads, so the file stays the one source. A change
+made on the server (over SSH, a copy put in place) is what the next task gets and what the editor opens. When the
+file is no longer the text last saved here, the editor and the list say so, with the difference; the next save keeps
+that text in the history as the one it replaced. Edits on the server between two saves here are not each kept, and a
+write on the server in the instant of a save here is not detected: edit in one place at a time. A file the editor
+cannot hold (a symbolic link, over 1 MB) is judged as the runner reads it and edited on the server; a file whose
+folder the console cannot write says so before anything is typed.
+
+Each version opens again as a draft, and so does the text it replaced: the file before the first save here, or an
+edit made on the server between two saves.
+
+The server's notes (`config/agent-notes.md`) are shown, never edited: `setup.sh --phase agent_notes` puts them in
+every Claude Code session on the server, so a change goes through Arceus' own review. A file outside the data folder
+is seen read-only (setup.sh mounts its folder for the console): keep the edited ones in the data folder, as the
+defaults do.
 
 ## Settings
 
@@ -386,7 +420,7 @@ combine:
 | QA | starts and stops test runs of the platform, edits their instructions |
 | Architect | decides on architecture findings, starts and stops reviews, edits their instructions |
 | Operator | sees the settings, restarts the runner and the engine, runs the setup check |
-| Admin | everything: edits the settings and the project's notes, runs setup, approves people and gives roles |
+| Admin | everything: edits the settings, the project's notes and the advisory triage's notes, runs setup, approves people and gives roles |
 
 The server checks the role on every request; a button that is not shown is not the check. A change of roles
 applies on the next page the person opens. Disabling an account signs it out everywhere at once. The last active

@@ -11,8 +11,8 @@ ROLE_WORDS = {
     "architect": ("Architect", "Decides on architecture findings (accepts the risk, marks a false positive, takes a "
                                "decision back), starts and stops reviews and edits their instructions."),
     "operator": ("Operator", "Sees the settings, restarts the runner and the engine, runs the setup check."),
-    "admin": ("Admin", "Everything: edits the settings and the project's notes, runs setup, approves people and "
-                       "gives them roles."),
+    "admin": ("Admin", "Everything: edits the settings, the project's notes and the advisory triage's notes, runs "
+                       "setup, approves people and gives them roles."),
 }
 
 # action -> the roles that allow it (admin allows everything)
@@ -25,6 +25,8 @@ ACTIONS: dict[str, frozenset[str]] = {
     "settings.view": frozenset({"operator"}),
     "settings.edit": frozenset(),
     "notes.edit": frozenset(),
+    "secops.instructions": frozenset(),
+    "instructions.view": frozenset({"qa", "architect", "operator"}),
     "ops.view": frozenset({"operator"}),
     "ops.restart": frozenset({"operator"}),
     "ops.check": frozenset({"operator"}),

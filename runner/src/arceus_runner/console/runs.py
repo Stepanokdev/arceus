@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from starlette.responses import HTMLResponse, Response
@@ -19,7 +20,7 @@ from arceus_runner.console.store import ConsoleError, User, parse_iso
 from arceus_runner.console.web import Ctx, Denied, Gone, Markup, as_number
 from arceus_runner.db import RUN_HOLDS, RUN_UNDER_WAY, AgentRun, ReviewStore
 from arceus_runner.qa import scenario_name
-from arceus_runner.workspace_run import CONSOLE_PATHS, MAX_INSTRUCTIONS, read_instructions
+from arceus_runner.workspace_run import CONSOLE_PATHS, MAX_INSTRUCTIONS, instructions_text, read_instructions
 
 KINDS = {"qa": ("qa", "test run", "Test runs"), "arch": ("architect", "architecture review", "Architecture reviews"),
          "secops": ("secops", "triage run", "Advisory triage")}
@@ -90,25 +91,47 @@ def stop(cfg: Config, kind: str, n: int) -> None:
         store.close()
 
 
+Verdict = tuple[str | None, str]  # what the agent gets, or None and why it cannot be given it
+
+
 def file_page(ctx: Ctx, *, kind: str, action: str, path: Path, title: str, lede: str, back: tuple[str, str],
-              required: bool, sensitive: bool = False) -> Response:
-    """The page that shows and edits one of the factory's text files, for the people `action` allows."""
+              required: bool, sensitive: bool = False, limit: int = MAX_INSTRUCTIONS, reads: str = "",
+              reader: Callable[[], Verdict] | None = None, check: Callable[[str], Verdict] | None = None) -> Response:
+    """The page that shows and edits one of the factory's text files, for the people `action` allows. The file is
+    judged as its runner reads it (`reader`), a draft by the same rule (`check`): a draft it refuses is never written,
+    so the console cannot save what would stop the next run."""
     if not ctx.can(action):
         raise Denied(action)
     user = ctx.user
     assert user is not None
+    reader = reader or (lambda: read_instructions(path, required=required))
+    check = check or (lambda t: instructions_text(t, path, required))
     current = files.read(path)
     text, sha, error, notice, conflict = current.text, current.sha, current.problem, "", ""
-    if ctx.request.method == "POST":
+    draft = ctx.request.method == "POST"
+    if draft:
         text = ctx.field("text")
+        # A text sent back keeps the version the person opened: a change made meanwhile is still a conflict on the
+        # next save, never replaced unseen.
+        sha = ctx.field("sha")
+        agent_gets, why = check(files.normal(text))
         try:
-            if files.save(ctx.store, kind, path, text, ctx.field("sha"), user, ctx.field("note")):
-                return ctx.redirect(ctx.path, "Saved. A run that starts from now on reads this version.")
-            notice = "Nothing changed: the file is already this text."
+            if agent_gets is None:
+                error = f"Not saved: {why}. Your text is still in the editor."
+            elif files.save(ctx.store, kind, path, text, sha, user, ctx.field("note")):
+                return ctx.redirect(ctx.path,
+                                    "Saved. " + (reads or "A run that starts from now on reads this version."))
+            else:
+                notice = "Nothing changed: the file is already this text."
         except files.Conflict as c:
-            conflict, sha = c.diff, c.current.sha
-            error = ("Someone changed the file since you opened it. The difference between what is on the server "
-                     "now and your text is below; your text is still in the editor. Save again to replace theirs.")
+            sha = c.current.sha
+            if c.current.exists and c.current.text == files.normal(text):
+                notice = "Nothing changed: the file is already this text."
+            else:
+                conflict = c.diff
+                error = ("Someone changed the file since you opened it. The difference between what is on the server "
+                         "now and your text is below; your text is still in the editor. Save again to replace "
+                         "theirs.")
         except OSError as e:
             error = f"Not saved: {e.strerror or e}"
             if getattr(e, "errno", None) == 30:  # read-only file system: a folder mounted read-only
@@ -117,15 +140,35 @@ def file_page(ctx: Ctx, *, kind: str, action: str, path: Path, title: str, lede:
     restoring = None
     if ctx.request.method == "GET" and (n := as_number(ctx.query("version"))) is not None:
         restoring = ctx.store.version_of(kind, n)
-        if restoring:
-            text = restoring["after_text"]
-    agent_gets, why = read_instructions(path, required=required)
+        # ?before=1: the text that version replaced (the file before the first save here, or an edit on the server).
+        if restoring and ctx.query("before") and restoring["before_text"] is not None:
+            restoring = {**restoring, "replaced": True}
+            text, draft = restoring["before_text"], True
+        elif restoring:
+            text, draft = restoring["after_text"], True
+    # What the agent would get from the text in the editor: the file's, or a draft's (sent back, or a version opened).
+    agent_gets, why = check(files.normal(text)) if draft else reader()
+    agent_bytes = len((agent_gets or "").rstrip("\n").encode())  # as the runner counts it against `limit`
+    versions = ctx.store.versions(kind)
     return ctx.render("file_edit.html", status=409 if conflict else 400 if error else 200,
                       title=title, lede=lede, path=path, text=text, sha=sha, exists=current.exists, error=error,
-                      notice=notice or ctx.query("notice"), conflict=conflict, back=back, restoring=restoring,
-                      versions=ctx.store.versions(kind), agent_ok=agent_gets is not None and bool(agent_gets.strip()),
-                      agent_why=why, agent_bytes=len((agent_gets or "").encode()), limit=MAX_INSTRUCTIONS,
-                      required=required, sensitive=sensitive, readonly=bool(current.problem))
+                      notice=notice or (ctx.query("notice") if ctx.request.method == "GET" else ""),
+                      conflict=conflict, back=back, restoring=restoring,
+                      versions=versions, outside=changed_outside(versions, current), note=ctx.field("note"),
+                      agent_ok=agent_gets is not None and bool(agent_gets.strip()),
+                      agent_why=why, agent_bytes=agent_bytes, limit=limit, left=limit - agent_bytes, draft=draft,
+                      reads=reads, required=required, sensitive=sensitive,
+                      readonly=bool(current.problem) or not files.writable(path))
+
+
+def changed_outside(versions: list[dict], current: files.Current) -> dict | None:
+    """The last version saved here, with the difference to the file, when the file is no longer that text: someone
+    changed it on the server (over SSH, a copy put in place). The file is what the agent gets; the history has that
+    text only once the next save here keeps it as what it replaced."""
+    if not versions or current.problem or current.sha == versions[0]["after_sha"]:
+        return None
+    return {**versions[0], "diff": files.diff(versions[0]["after_text"], current.text if current.exists else "",
+                                              "last saved here", "the file now")}
 
 
 def _epoch(value: str | None) -> float | None:
