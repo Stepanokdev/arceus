@@ -879,8 +879,11 @@ class WorkspaceRun:
         - The run never asked the engine to start: not its.
         - The very session that was there before the run asked (tmux's time it was made, kept with the ask): not
           its. The engine starts the run's worker in a session of its own making, after it has found the folder free.
-        - The engine names this run as the folder's task (`task-id`), or names none: its (a start cut off between
-          the session and that record is still the run's).
+        - The engine names this run as the folder's task (`task-id`): its.
+        - A start is under way in the folder (the engine's folder lock held by a live process): not its, until that
+          start has named its task.
+        - The engine names no task, and no start is under way: its (a start cut off between the session and that
+          record is still the run's).
         - It names another task: that task's if the engine shows it at work there, or if its last attempt began
           when or after this run asked (it took the folder in the meantime: the busy answer); an earlier run's,
           left from before (also one the engine still calls running with no live attempt), and so this run's own
@@ -893,8 +896,14 @@ class WorkspaceRun:
         if created is not None and snap.get("session_before") is not None and created == snap["session_before"]:
             return False
         named = self.d.engine.session_task(session)
-        if named is None or named == run.id:
+        if named == run.id:
             return True
+        if self.d.engine.folder_starting(session):
+            # A start is under way in the folder right now (the engine's folder lock held by a live process): the
+            # session is whoever holds it, and it names its task when it is done. Never taken meanwhile.
+            return False
+        if named is None:
+            return True  # the start that made it is over and named no task: this run's own, cut off
         other = self.d.engine.show(named)
         if other is None:
             return True  # the engine keeps no record of it: no task at work there

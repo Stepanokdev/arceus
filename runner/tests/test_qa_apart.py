@@ -1625,3 +1625,84 @@ def test_a_deadline_that_passes_while_tmux_is_asked_starts_nothing(w, monkeypatc
     w.tick()
     run = w.store.run(RID)
     assert run.state == "done" and "could not start" in run.reason and dispatches(w) == [] and refs(w, w.repo) == ""
+
+
+@pytest.mark.parametrize("then", ["stop", "deadline"])
+def test_a_start_under_way_in_the_folder_before_it_names_its_task_is_never_taken(w, monkeypatch, then):
+    """Another start took the engine's folder lock after the run's last look at tmux, made the session and has not
+    written task-id yet; the run was answered busy and the runner died before it recorded that. After the restart
+    the lock is held by a live process: the session is that start's. The stop or the end of time waits, touches
+    nothing of the folder, never dispatches again; the run closes only once that worker has gone."""
+    engine = w.runner.qa.d.engine
+    name = session(w)
+    slug = name.removeprefix("night-")
+    lock = w.cfg.paths.bulava_state / "locks" / f"task-life-{slug}"
+    holder = subprocess.Popen(["sleep", "300"])
+    try:
+        def busy_then_die(**kw):
+            w.set_engine(lambda s: s.setdefault("sessions", []).append(name))  # its session, made under the lock
+            lock.mkdir(parents=True, exist_ok=True)
+            (lock / "pid").write_text(f"{holder.pid}\n")
+            (w.cfg.paths.bulava_state / "instances" / slug / "task-id").unlink(missing_ok=True)
+            raise OSError("busy, and the runner dies before it records that")
+        with monkeypatch.context() as m:
+            m.setattr(engine, "dispatch", busy_then_die)
+            w.store.add_run("qa", "command", "ops", scenario=1)
+            w.tick()
+        assert json.loads(w.store.run(RID).snapshot)["asked"] is True
+        w.restart()
+        if then == "stop":
+            w.store.update_run(RID, stop_requested=1)
+        else:
+            w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+        before = its_files(w)
+        w.tick()
+        w.tick()
+        assert w.store.run(RID).state == "preparing" and its_files(w) == before and name in sessions(w)
+        assert stops(w) == [] and dispatches(w) == []
+        # That start finishes: it names its task (at work) and lets the lock go. Still not the run's.
+        instance = w.cfg.paths.bulava_state / "instances" / slug
+        instance.mkdir(parents=True, exist_ok=True)
+        (instance / "task-id").write_text("qa-0\n")
+        w.set_engine(lambda s: s["tasks"].update({"qa-0": {"task_id": "qa-0", "state": "running", "attempt_live": True,
+                                                            "project": str(home(w)), "session": name, "attempts": []}}))
+        shutil.rmtree(lock)
+        w.tick()
+        assert w.store.run(RID).state == "preparing" and its_files(w) == before and name in sessions(w)
+        assert stops(w) == [] and dispatches(w) == []
+        # Its worker goes: now the run closes.
+        w.set_engine(lambda s: (s["sessions"].remove(name), s["tasks"].pop("qa-0")))
+        w.tick()
+        run = w.store.run(RID)
+        assert run.state == "done" and dispatches(w) == [] and stops(w) == [] and refs(w, w.repo) == ""
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_a_start_whose_holder_died_leaves_the_session_to_the_run_that_asked(w, monkeypatch):
+    """The engine's folder lock is still there, but its process is gone (the start died): no start is under way, and
+    the session without a task-id is the run's own cut-off start, ended by its stop."""
+    engine = w.runner.qa.d.engine
+    name = session(w)
+    slug = name.removeprefix("night-")
+    lock = w.cfg.paths.bulava_state / "locks" / f"task-life-{slug}"
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+
+    def session_then_die(**kw):
+        w.set_engine(lambda s: s.setdefault("sessions", []).append(name))
+        lock.mkdir(parents=True, exist_ok=True)
+        (lock / "pid").write_text(f"{dead.pid}\n")
+        (w.cfg.paths.bulava_state / "instances" / slug / "task-id").unlink(missing_ok=True)
+        raise OSError("the start died before it named its task")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", session_then_die)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    w.restart()
+    w.store.update_run(RID, stop_requested=1)
+    w.tick()
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and name not in sessions(w) and gone_before_restored(w) and dispatches(w) == []

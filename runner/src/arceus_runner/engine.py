@@ -335,6 +335,34 @@ class Engine:
         except subprocess.TimeoutExpired:
             raise EngineError("tmux: timed out") from None
 
+    def folder_starting(self, session: str) -> bool:
+        """Whether a start is under way in the folder whose session this is: the engine's folder lock
+        (`locks/task-life-<slug>`, lib/tasks.sh task_lifecycle_lock), which dispatch.sh holds from deciding the
+        folder is free to recording its attempt (the folder's `task-id` among it), is held by a live process. A lock
+        whose process is gone, or older than the engine's own 300 s, is a start that is no longer under way."""
+        lock = self.cfg.paths.bulava_state / "locks" / f"task-life-{session.removeprefix('night-')}"
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            raise EngineError(f"the engine's lock of the folder of {session} cannot be read ({e})") from None
+        if age > 300:
+            return False
+        try:
+            pid = int((lock / "pid").read_text().strip())
+        except FileNotFoundError:
+            return True  # just taken: its holder has not written its pid yet
+        except (OSError, ValueError) as e:
+            raise EngineError(f"the engine's lock of the folder of {session} cannot be read ({e})") from None
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # alive, another user's
+        return True
+
     def session_created(self, session: str) -> int | None:
         """When tmux made that session (its own `session_created`, seconds), None when it has no such session: with
         the name, it tells one start of a worker from another. Errors as `session_alive`."""
