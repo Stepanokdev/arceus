@@ -335,6 +335,31 @@ class Engine:
         except subprocess.TimeoutExpired:
             raise EngineError("tmux: timed out") from None
 
+    def session_created(self, session: str) -> int | None:
+        """When tmux made that session (its own `session_created`, seconds), None when it has no such session: with
+        the name, it tells one start of a worker from another. Errors as `session_alive`."""
+        env, tmux = self._tmux_args()
+        try:
+            r = subprocess.run([*tmux, "list-sessions", "-F", "#{session_name} #{session_created}"], env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        except FileNotFoundError:
+            raise EngineError("tmux is not on PATH: whether the worker's session is gone cannot be told") from None
+        except subprocess.TimeoutExpired:
+            raise EngineError("tmux: timed out") from None
+        if r.returncode != 0:
+            why = r.stderr.strip()
+            if "no server running" in why or ("error connecting to" in why and "No such file or directory" in why):
+                return None
+            raise EngineError(f"tmux list-sessions: exit {r.returncode}: {why[-300:]}")
+        for line in r.stdout.splitlines():
+            name, _, created = line.rpartition(" ")
+            if name == session:
+                try:
+                    return int(created)
+                except ValueError:
+                    raise EngineError(f"tmux gave no time for session {session}") from None
+        return None
+
     def session_alive(self, session: str) -> bool:
         """Whether the tmux server has that session. "No" only when tmux says so: it lists its sessions and this is
         not among them, or no server runs at all. Any other failure is an EngineError, never taken for "gone"."""

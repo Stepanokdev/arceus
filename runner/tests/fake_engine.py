@@ -60,7 +60,11 @@ def tmux(s: dict, argv: list[str]) -> int:
         if not sessions:
             print("no server running on /tmp/tmux-fake/bulava", file=sys.stderr)
             return 1
-        print("\n".join(sessions))
+        made = s.setdefault("created", {})
+        fmt = argv[argv.index("-F") + 1] if "-F" in argv else "#{session_name}"
+        for name in sessions:
+            made.setdefault(name, int(datetime.now(UTC).timestamp()))  # when it was first seen, as tmux keeps it
+            print(fmt.replace("#{session_name}", name).replace("#{session_created}", str(made[name])))
         return 0
     if argv[:1] == ["has-session"]:
         return 0 if name in sessions else 1
@@ -69,6 +73,7 @@ def tmux(s: dict, argv: list[str]) -> int:
             return 1
         if name not in s.get("unkillable", []):  # a session a test keeps alive whatever is asked
             sessions.remove(name)
+            s.setdefault("created", {}).pop(name, None)
         return 0
     return 2
 

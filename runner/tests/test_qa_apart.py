@@ -1510,3 +1510,86 @@ def test_a_task_id_the_runner_cannot_read_is_an_engine_error_and_nothing_goes(w,
         assert any("cannot be read" in e["reason"] for e in w.events_named("qa_step_failed"))
     finally:
         (instance / "task-id").chmod(0o644)
+
+
+@pytest.mark.parametrize("then", ["stop", "deadline"])
+def test_a_worker_there_before_the_ask_is_never_taken_even_with_its_verdict_in_the_same_second(w, monkeypatch, then):
+    """Another task's worker took the folder after the run checked it and before it asked the engine (its session is
+    there when the ask is kept), the engine answered busy, the runner died; the other task's verdict then lands in
+    the very second this run asked. That start of the session was there before the ask: it is never this run's, it
+    is left untouched by the stop or the end of time, and the run closes only once it has gone."""
+    engine, git_ = w.runner.qa.d.engine, w.runner.qa.git
+    real_checkout, real_dispatch = git_.checkout_at, engine.dispatch
+
+    def taken_meanwhile(*a, **kw):
+        made = real_checkout(*a, **kw)
+        if "qa-0" not in w.engine_state()["tasks"]:
+            another_task_in_the_folder(w)
+            w.set_engine(lambda s: s["tasks"]["qa-0"].update(
+                attempts=[{"n": 1, "started_at": (w.now - timedelta(minutes=10)).isoformat(), "ended_at": None}]))
+        return made
+
+    def busy_then_die(**kw):
+        reply = real_dispatch(**kw)
+        assert reply.rc == 6
+        raise OSError("the runner dies before it records busy")
+    with monkeypatch.context() as m:
+        m.setattr(git_, "checkout_at", taken_meanwhile)
+        m.setattr(engine, "dispatch", busy_then_die)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    snap = json.loads(w.store.run(RID).snapshot)
+    other = session(w)
+    assert snap["asked"] is True and snap["session_before"] is not None
+    same_second = w.now.replace(microsecond=0).isoformat()
+    w.set_engine(lambda s: s["tasks"]["qa-0"].update(state="done", attempt_live=False, attempts=[
+        {"n": 1, "started_at": (w.now - timedelta(minutes=10)).isoformat(), "ended_at": same_second}]))
+    w.restart()
+    if then == "stop":
+        w.store.update_run(RID, stop_requested=1)
+    else:
+        w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+    n = len(dispatches(w))
+    before = its_files(w)
+    w.tick()
+    w.tick()
+    assert w.store.run(RID).state == "preparing" and its_files(w) == before and other in sessions(w)
+    assert stops(w) == [] and len(dispatches(w)) == n
+    w.set_engine(lambda s: s["sessions"].remove(other))
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and len(dispatches(w)) == n and refs(w, w.repo) == ""
+
+
+@pytest.mark.parametrize("then", ["stop", "deadline"])
+def test_a_start_cut_off_while_task_id_names_an_earlier_run_stuck_running_is_still_the_runs(w, monkeypatch, then):
+    """The engine's task-id still names an earlier run its record calls running with no live attempt (one stopped
+    from outside), and this run's start was cut off after the engine made the session. That session was not there
+    when this run asked: it is this run's own, ended by the stop or the end of its time, and only then put back."""
+    engine = w.runner.qa.d.engine
+    name = session(w)
+    instance = w.cfg.paths.bulava_state / "instances" / name.removeprefix("night-")
+    hour_ago = (w.now - timedelta(hours=1)).isoformat()
+
+    def session_then_die(**kw):
+        w.set_engine(lambda s: (s.setdefault("sessions", []).append(name), s["tasks"].update({"qa-0": {
+            "task_id": "qa-0", "state": "running", "attempt_live": False, "project": str(home(w)),
+            "session": "night-gone", "attempts": [{"n": 1, "started_at": hour_ago, "ended_at": None}]}})))
+        instance.mkdir(parents=True, exist_ok=True)
+        (instance / "task-id").write_text("qa-0\n")
+        raise OSError("the runner dies before the engine names the task")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", session_then_die)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    assert json.loads(w.store.run(RID).snapshot)["session_before"] is None
+    w.restart()
+    if then == "stop":
+        w.store.update_run(RID, stop_requested=1)
+    else:
+        w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+    w.tick()
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and name not in sessions(w) and gone_before_restored(w)
+    assert not checkout(w).exists() and refs(w, w.repo) == "" and dispatches(w) == []

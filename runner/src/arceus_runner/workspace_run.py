@@ -662,7 +662,11 @@ class WorkspaceRun:
         if run.folder:
             # Kept before the engine is asked: only a run that asked, and was not told `busy`, may take the folder's
             # session for its own after a crash (reconcile). A session there otherwise is another task's.
-            run = self._set_snapshot(run, asked=True, asked_at=self.d.now().astimezone(timezone.utc).isoformat())
+            # Which start of the folder's session was there before this run asked, if any (tmux's own time it was
+            # made): one the engine starts for this run is another. Kept with the ask, before the engine is asked.
+            before = self.d.engine.session_created(json.loads(self.store.run(run.id).snapshot)["session"])
+            run = self._set_snapshot(run, asked=True, asked_at=self.d.now().astimezone(timezone.utc).isoformat(),
+                                     session_before=before)
         reply = self.d.engine.dispatch(task_id=run.id, message_id=f"{self.KIND}-{run.id}", author=run.requested_by,
                                        source="other", branch=branch, base=HOME_BRANCH, repo=Path(root),
                                        text=snap["text"], clearance=trusted(snap["text"]), extra_dirs=extra,
@@ -863,34 +867,40 @@ class WorkspaceRun:
         return True
 
     def _ours(self, run: AgentRun, session: str) -> bool:
-        """Whether the folder's live session (by its kept name) is this run's worker. The engine names the folder's
-        task (`task-id`) once it has found the folder free, after it has started the session:
-        - it names this run: ours;
-        - it names another task the engine shows at work in this folder: that task's (this run was told `busy`,
-          whether or not the runner lived to record it);
-        - it names none, or a task no longer at work there (an earlier run's): this run's own start, cut off between
-          the session and the record, if it asked the engine to start; nobody's it knows of otherwise.
-        An engine that cannot say is an EngineError: nothing is done meanwhile."""
+        """Whether the folder's live session (by its kept name) is the worker this run started: told by that start of
+        the session, never by the clock of a verdict.
+        - The run never asked the engine to start: not its.
+        - The very session that was there before the run asked (tmux's time it was made, kept with the ask): not
+          its. The engine starts the run's worker in a session of its own making, after it has found the folder free.
+        - The engine names this run as the folder's task (`task-id`), or names none: its (a start cut off between
+          the session and that record is still the run's).
+        - It names another task: that task's if the engine shows it at work there, or if its last attempt began
+          when or after this run asked (it took the folder in the meantime: the busy answer); an earlier run's,
+          left from before (also one the engine still calls running with no live attempt), and so this run's own
+          start, otherwise.
+        An engine or tmux that cannot say is an EngineError: nothing is done meanwhile."""
         snap = json.loads(run.snapshot or "{}")
         if not snap.get("asked"):
+            return False
+        created = self.d.engine.session_created(session)
+        if created is not None and snap.get("session_before") is not None and created == snap["session_before"]:
             return False
         named = self.d.engine.session_task(session)
         if named is None or named == run.id:
             return True
-        # Another task is named. It is an earlier run's, left from before, only if its work was over before this run
-        # asked the engine; one at work when this run asked made the engine answer busy, and the session is its own
-        # whatever its record says by now (a verdict comes a few seconds before its session goes).
         other = self.d.engine.show(named)
         if other is None:
             return True  # the engine keeps no record of it: no task at work there
-        if other.get("state") in ("queued", "running"):
+        if other.get("state") in ("queued", "running") and other.get("attempt_live") is True:
             return False
+        began = [a.get("started_at") for a in other.get("attempts") or []]
         asked = snap.get("asked_at")
-        ended = [a.get("ended_at") for a in other.get("attempts") or []]
-        if not asked or not ended or not all(ended):
-            return False  # when its work ended is not known: never taken for this run's
+        if not asked or not began or not all(began):
+            return False  # when it began is not known: never taken for this run's
         try:
-            return max(_when(e) for e in ended) < _when(asked)
+            # Whole seconds on the engine's side: an attempt that began in the second this run asked, or later, is
+            # taken as the one that made the engine answer busy.
+            return max(_when(b) for b in began) < _when(asked).replace(microsecond=0)
         except (TypeError, ValueError):
             return False  # a time it cannot read: never taken for this run's
 
