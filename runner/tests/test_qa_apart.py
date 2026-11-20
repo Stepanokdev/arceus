@@ -1216,6 +1216,9 @@ def another_task_in_the_folder(w) -> str:
     """A task of the engine's already at work in the test runs' folder (a run before, its worker still live), with
     a home of its own: a branch, something staged, and its checkout in repos."""
     name = session(w)
+    instance = w.cfg.paths.bulava_state / "instances" / name.removeprefix("night-")
+    instance.mkdir(parents=True, exist_ok=True)
+    (instance / "task-id").write_text("qa-0\n")  # the engine names the other task as the folder's
     w.set_engine(lambda s: (s["tasks"].update({"qa-0": {"task_id": "qa-0", "state": "running", "attempt_live": True,
                                                          "project": str(home(w)), "session": name, "attempts": []}}),
                             s.setdefault("sessions", []).append(name), s.update(busy_by_folder=True)))
@@ -1356,3 +1359,35 @@ def test_a_deadline_that_passes_inside_a_busy_dispatch_waits_for_the_other_worke
     run = w.store.run(RID)
     assert run.state == "done" and "could not start" in run.reason and len(dispatches(w)) == n
     assert refs(w, w.repo) == ""
+
+
+def test_a_runner_that_died_before_it_recorded_busy_never_takes_the_other_workers_session(w, monkeypatch):
+    """The engine answered busy (another task's worker took the folder) and the runner died before it wrote that
+    down, so the run still says it asked. The engine names the other task as the folder's (`task-id`): after the
+    restart the session is not taken for this run's, nothing of the folder is touched, and the run starts once that
+    worker has gone."""
+    engine = w.runner.qa.d.engine
+    real = engine.dispatch
+
+    def busy_then_die(**kw):
+        another_task_in_the_folder(w)
+        reply = real(**kw)
+        assert reply.rc == 6
+        raise OSError("the runner dies before it records busy")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", busy_then_die)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    run = w.store.run(RID)
+    assert run.state == "preparing" and json.loads(run.snapshot)["asked"] is True
+    other = session(w)
+    before = its_files(w)
+    w.restart()
+    w.tick()
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "preparing" and its_files(w) == before and other in sessions(w) and stops(w) == []
+    assert w.events_named("qa_waits")[-1]["reason"] == "folder_busy"
+    w.set_engine(lambda s: (s["sessions"].remove(other), s["tasks"].pop("qa-0")))
+    w.tick()
+    assert w.store.run(RID).state == "running" and dispatches(w)[-1]["argv"][-2] == str(home(w))

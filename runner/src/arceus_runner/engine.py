@@ -299,6 +299,18 @@ class Engine:
         base = re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9]", "-", os.path.basename(real))).strip("-") or "proj"
         return f"night-{base}-{hashlib.sha1(real.encode()).hexdigest()[:12]}"
 
+    def folder_task(self, repo: Path) -> str | None:
+        """The task the engine last started in `repo` (dispatch.sh writes its id into the folder's instance, as
+        `task-id`, after it has decided the folder is not busy), or None when it names none. A session in the folder
+        is a task's only if this names it."""
+        slug = self.folder_session(repo).removeprefix("night-")
+        try:
+            return (self.cfg.paths.bulava_state / "instances" / slug / "task-id").read_text().strip() or None
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise EngineError(f"the engine's record of the task in {repo} cannot be read ({e})") from None
+
     def _tmux_args(self) -> tuple[dict[str, str], list[str]]:
         """tmux as the engine calls it: on a server its workers live in a tmux server of the engine's own, `-L
         bulava` unless SUPERVISOR_TMUX_SOCKET names another (engine/supervisor/config.sh). Asked anywhere else, tmux

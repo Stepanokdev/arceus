@@ -767,7 +767,8 @@ class WorkspaceRun:
                         self.store.update_run(run.id, state="running")
                     elif self.d.engine.show(run.id) is not None:
                         self.store.update_run(run.id, state="running")
-                    elif snap.get("asked") and snap.get("session") and self.d.engine.session_alive(snap["session"]):
+                    elif snap.get("asked") and snap.get("session") and self._ours(run) \
+                            and self.d.engine.session_alive(snap["session"]):
                         self.store.update_run(run.id, state="running")
                     elif run.stop_requested:
                         if not (run.folder and self._foreign_worker(run, self.root(run))):
@@ -843,16 +844,23 @@ class WorkspaceRun:
 
     def _foreign_worker(self, run: AgentRun, home: Path) -> bool:
         """Whether a worker that is not this run's is at work in the folder (`home`): the engine's session of that
-        folder is alive while this run has not asked the engine to start (or was answered `busy`). Then nothing of
+        folder is alive and the engine does not name this run as its task (`task-id`), or this run never asked the
+        engine to start, or was answered `busy`. Then nothing of
         the folder is touched, its checkouts, its home's branch and index, until it has gone: the run waits, and an
         error asking tmux is an error, never "free". True while one is there."""
-        if json.loads(run.snapshot or "{}").get("asked"):
-            return False
         session = self.d.engine.folder_session(Path(home))
         if not self.d.engine.session_alive(session):
             return False
+        if json.loads(run.snapshot or "{}").get("asked") and self._ours(run, home):
+            return False
         self._note_waiting(run, "folder_busy", session=session)
         return True
+
+    def _ours(self, run: AgentRun, home: Path | None = None) -> bool:
+        """Whether the engine names this run as the task in its folder (its `task-id`): only then is a session there
+        this run's. After a `busy` answer it names the other task, whether or not the runner lived to record the
+        answer."""
+        return self.d.engine.folder_task(Path(home or self.root(run))) == run.id
 
     def _set_snapshot(self, run: AgentRun, **fields) -> AgentRun:
         snap = {**json.loads(self.store.run(run.id).snapshot or "{}"), **fields}

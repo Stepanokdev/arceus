@@ -148,6 +148,10 @@ def main() -> int:
         }
         open_session(s, repo)
         s["tasks"][tid]["session"] = session_of(repo)
+        # Like dispatch.sh: the folder's instance names the task it started there.
+        instance = STATE.parent / "instances" / session_of(repo).removeprefix("night-")
+        instance.mkdir(parents=True, exist_ok=True)
+        (instance / "task-id").write_text(tid + "\n")
         save(s)
         return emit("dispatched", {"task_id": tid, "dispatch_id": "d-1", "attempt": 1, "message_id": f.get("message-id")})
 
