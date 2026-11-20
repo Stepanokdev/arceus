@@ -1593,3 +1593,35 @@ def test_a_start_cut_off_while_task_id_names_an_earlier_run_stuck_running_is_sti
     run = w.store.run(RID)
     assert run.state == "done" and name not in sessions(w) and gone_before_restored(w)
     assert not checkout(w).exists() and refs(w, w.repo) == "" and dispatches(w) == []
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_a_deadline_that_passes_while_tmux_is_asked_starts_nothing(w, monkeypatch, worker):
+    """The run's time runs out while tmux is asked about the folder's session, the last thing before the engine:
+    the engine is never asked. With a worker in the folder by then, nothing is put back until it has gone."""
+    engine = w.runner.qa.d.engine
+    real = engine.session_created
+
+    def slow(name):
+        if worker and "qa-0" not in w.engine_state()["tasks"]:
+            another_task_in_the_folder(w)
+        w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+        return real(name)
+    with monkeypatch.context() as m:
+        m.setattr(engine, "session_created", slow)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    assert dispatches(w) == []
+    run = w.store.run(RID)
+    if not worker:
+        assert run.state == "done" and "could not start" in run.reason and not checkout(w).exists()
+        return
+    other = session(w)
+    before = its_files(w)
+    assert run.state == "preparing" and other in sessions(w)
+    w.tick()
+    assert w.store.run(RID).state == "preparing" and its_files(w) == before and dispatches(w) == []
+    w.set_engine(lambda s: (s["sessions"].remove(other), s["tasks"].pop("qa-0")))
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and "could not start" in run.reason and dispatches(w) == [] and refs(w, w.repo) == ""

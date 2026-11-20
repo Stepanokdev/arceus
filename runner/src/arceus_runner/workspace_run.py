@@ -655,16 +655,23 @@ class WorkspaceRun:
             if not snap.get("session"):
                 snap["session"] = self.d.engine.folder_session(Path(root))
                 run = self.store.update_run(run.id, snapshot=json.dumps(snap))
-        if self._overdue(run):  # again: getting the checkouts ready can take long, and a run never starts late
+        before = None
+        if run.folder:
+            # Which start of the folder's session is there before this run asks, if any (tmux's own time it was
+            # made): one the engine starts for this run is another. Asked of tmux before the last look at the clock.
+            before = self.d.engine.session_created(json.loads(self.store.run(run.id).snapshot)["session"])
+        if self._overdue(run):
+            # Last, right before the engine is asked: getting the checkouts ready and asking tmux take time, and a
+            # run never starts late. It has not asked: a worker in the folder now is another's, and nothing is put
+            # back while it is there.
+            if run.folder and self._foreign_worker(run, root):
+                return
             hours = self._given(run).total_seconds() / 3600
             self._settled(run, None, f"the run could not start in its {hours:g} h: the engine stayed busy")
             return
         if run.folder:
             # Kept before the engine is asked: only a run that asked, and was not told `busy`, may take the folder's
-            # session for its own after a crash (reconcile). A session there otherwise is another task's.
-            # Which start of the folder's session was there before this run asked, if any (tmux's own time it was
-            # made): one the engine starts for this run is another. Kept with the ask, before the engine is asked.
-            before = self.d.engine.session_created(json.loads(self.store.run(run.id).snapshot)["session"])
+            # session for its own after a crash (reconcile); `session_before` is the start of it that was not.
             run = self._set_snapshot(run, asked=True, asked_at=self.d.now().astimezone(timezone.utc).isoformat(),
                                      session_before=before)
         reply = self.d.engine.dispatch(task_id=run.id, message_id=f"{self.KIND}-{run.id}", author=run.requested_by,
