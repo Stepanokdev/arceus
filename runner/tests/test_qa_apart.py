@@ -1325,3 +1325,34 @@ def test_a_home_git_with_commondir_is_refused_when_a_run_is_prepared(w):
     run = w.store.run(RID)
     assert (run.state, run.outcome) == ("done", "unfinished") and ".git" in run.reason
     assert ticket_git(w) == before and dispatches(w) == []
+
+
+def test_a_deadline_that_passes_inside_a_busy_dispatch_waits_for_the_other_worker_and_never_asks_again(w, monkeypatch):
+    """The run's time runs out while the engine is being asked, and the engine answers busy because another task's
+    worker took the folder meanwhile: that worker's home, index, files and checkouts stay until it has gone; then
+    the run closes as unable to start, never dispatched again."""
+    engine = w.runner.qa.d.engine
+    real = engine.dispatch
+
+    def late_and_taken(**kw):
+        another_task_in_the_folder(w)
+        w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+        return real(**kw)
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", late_and_taken)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    run = w.store.run(RID)
+    assert run.state == "preparing" and json.loads(run.snapshot)["asked"] is False
+    other = session(w)
+    before = its_files(w)
+    n = len(dispatches(w))
+    w.tick()
+    w.tick()
+    assert w.store.run(RID).state == "preparing" and its_files(w) == before and other in sessions(w)
+    assert len(dispatches(w)) == n and stops(w) == []
+    w.set_engine(lambda s: (s["sessions"].remove(other), s["tasks"].pop("qa-0")))
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and "could not start" in run.reason and len(dispatches(w)) == n
+    assert refs(w, w.repo) == ""

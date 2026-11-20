@@ -671,6 +671,10 @@ class WorkspaceRun:
             if run.folder:
                 run = self._set_snapshot(run, asked=False)
             if self._overdue(run):
+                # Out of time, but the folder may be another worker's now: nothing is put back while it is there.
+                # A later pass (reconcile, `_dispatch`) waits for it, then closes the run without asking again.
+                if run.folder and self._foreign_worker(run, root):
+                    return
                 hours = self._given(run).total_seconds() / 3600
                 self._settled(run, None, f"the run could not start in its {hours:g} h: the engine stayed busy")
             else:
