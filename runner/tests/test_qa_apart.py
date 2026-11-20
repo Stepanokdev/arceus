@@ -1034,3 +1034,128 @@ def test_a_link_on_the_way_to_the_report_folder_removes_nothing_on_its_other_sid
     run = w.store.run(RID)
     assert run.state == "done"
     assert (victim / "keep.txt").read_text() == "not the runner's\n"
+
+
+# -- the home's own git, a ref made before its commit was kept, a refused dispatch, a stop before anything else ------
+
+def ticket_git(w) -> dict:
+    """The ticket's clone's git: everything but the run's own ref (`refs/arceus/`), which putting back removes."""
+    refs_ = [r for r in git(w.repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines()
+             if not r.startswith("refs/arceus/")]
+    return {"head": git(w.repo, "rev-parse", "HEAD"), "branch": git(w.repo, "branch", "--show-current"),
+            "index": git(w.repo, "diff", "--cached"), "refs": refs_, "stash": git(w.repo, "stash", "list")}
+
+
+@pytest.mark.parametrize("how", ["link", "gitdir"])
+def test_a_home_whose_git_leads_to_the_tickets_is_never_used(w, how):
+    """`home/.git` turned into a link to the ticket's clone's git, or a `.git` file naming it (`gitdir:`): every git
+    command in home would act on the ticket's metadata. Refused when a run is prepared, and found when it ends."""
+    take(w)
+    dirty_ticket(w)
+
+    def redirect():
+        g = home(w) / ".git"
+        if g.is_dir() and not g.is_symlink():
+            unlock(g)
+            shutil.rmtree(g)
+        if how == "link":
+            g.symlink_to(w.repo / ".git")
+        else:
+            g.write_text(f"gitdir: {w.repo / '.git'}\n")
+
+    # Prepared into a folder whose home's git is someone else's: refused before anything runs there.
+    home(w).mkdir(parents=True)
+    (qa_root(w) / FOLDER_MARK).write_text("ours\n")
+    redirect()
+    before = ticket_git(w)
+    queue(w)
+    run = w.store.run(RID)
+    assert (run.state, run.outcome) == ("done", "unfinished") and ".git" in run.reason
+    assert ticket_git(w) == before and dispatches(w) == []
+
+
+@pytest.mark.parametrize("how", ["link", "gitdir"])
+def test_a_home_whose_git_is_redirected_while_the_run_works_is_left_alone(w, how):
+    take(w)
+    dirty_ticket(w)
+    queue(w)
+    g = home(w) / ".git"
+    shutil.rmtree(g)
+    if how == "link":
+        g.symlink_to(w.repo / ".git")
+    else:
+        g.write_text(f"gitdir: {w.repo / '.git'}\n")
+    before = ticket_git(w)
+    finish(w)
+    run = w.store.run(RID)
+    assert run.state == "done" and "no longer the runner's folder" in run.reason
+    assert ticket_git(w) == before and refs(w, w.repo) == ""
+
+
+def test_a_ref_made_before_a_crash_kept_its_commit_is_the_one_read(w, monkeypatch):
+    """The runner died after the fetch made the run's ref and before it wrote down the commit: the next pass takes
+    the commit from that ref, not from the code host's branch, which has moved on meanwhile."""
+    real = w.runner.qa.git.fetch_pinned
+
+    def fetch_then_die(path, branch, ref):
+        real(path, branch, ref)
+        raise OSError("the runner dies here")
+    with monkeypatch.context() as m:
+        m.setattr(w.runner.qa.git, "fetch_pinned", fetch_then_die)
+        queue(w)
+    chosen = git(w.repo, "rev-parse", "refs/arceus/qa-1")
+    assert json.loads(w.store.run(RID).snapshot)["pinned"] == {"acme-platform": None}
+    newer = push_main(w)
+    w.restart()
+    w.tick()
+    assert w.store.run(RID).state == "running"
+    assert git(checkout(w), "rev-parse", "HEAD") == chosen != newer
+    assert json.loads(w.store.run(RID).snapshot)["pinned"]["acme-platform"] == chosen
+
+
+def test_a_dispatch_the_engine_refused_after_starting_a_session_waits_for_it(w):
+    """The engine may start the folder's session and then refuse (exit 2): the run's checkouts stay until that
+    session is gone, and while tmux cannot say, they stay too."""
+    w.store.add_run("qa", "command", "ops", scenario=1)
+    w.set_engine(lambda s: (s["next_rc"].update({"dispatch": 2}), s.setdefault("sessions", []).append(session(w)),
+                            s.update(unkillable=[session(w)])))
+    w.tick()
+    co = checkout(w)
+    run = w.store.run(RID)
+    assert run.state == "running" and co.exists() and refs(w, w.repo) != ""
+    assert json.loads(run.snapshot)["stopping"]["why"].startswith("the execution engine did not accept the run")
+    w.set_engine(lambda s: s.update(unkillable=[], tmux_fails=True))
+    w.tick()
+    assert w.store.run(RID).state == "running" and co.exists()
+    w.set_engine(lambda s: s.update(tmux_fails=False))
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and "did not accept" in run.reason and not co.exists() and refs(w, w.repo) == ""
+    assert session(w) not in sessions(w)
+
+
+def test_a_stop_under_way_reads_and_sends_nothing_through_a_replaced_home(w, monkeypatch):
+    """A stop whose first try could not end the worker, a part of the report waiting to be sent, and home replaced
+    by a link to the ticket's workspace: the next pass goes on with the stop before anything else, reads nothing
+    through the link and sends nothing."""
+    take(w)
+    queue(w)
+    report_in_parts(w)
+    w.set_engine(lambda s: s["next_rc"].update({"worker-send": 6}))  # the next part waits to be sent
+    accepted_with_notes(w, why="STATE: COMPLETE\nVERDICT: FAIL\n1. Finding 1 names no URL.")
+    assert json.loads(w.store.run(RID).snapshot)["review"]["sent"] is False
+    sends = len([c for c in w.calls("worker-send") if RID in c["argv"]])
+    keep_alive(w, session(w))  # the first try to stop cannot end it
+    w.store.update_run(RID, stop_requested=1)
+    w.tick()
+    assert json.loads(w.store.run(RID).snapshot).get("stopping")
+    replace_home_with_link(w)
+    read = []
+    monkeypatch.setattr(w.runner.qa, "_note_progress", lambda run: read.append(run.id) or run)
+    w.tick()
+    keep_alive(w)
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and read == []
+    assert len([c for c in w.calls("worker-send") if RID in c["argv"]]) == sends
+    assert not (w.cfg.paths.workspace / "artifacts").exists()

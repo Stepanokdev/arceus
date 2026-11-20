@@ -140,6 +140,15 @@ FOLDER_MARK_TEXT = ("The Arceus runner's folder for test runs (config qa.workspa
                     "checkouts here; keep nothing of your own in it.\n")
 
 
+def own_git(home: Path) -> bool:
+    """Whether `home` has a git folder of its own, or none yet: never a link, nor a `.git` file (`gitdir:`) that would
+    send every git command run there into another repository's metadata (a ticket's)."""
+    git_dir = home / ".git"
+    if not git_dir.exists() and not git_dir.is_symlink():
+        return True
+    return git_dir.is_dir() and not git_dir.is_symlink()
+
+
 def folder_problem(root: Path) -> str:
     """Why `root` cannot be a folder of the runner's own, or "": one that does not exist yet, or an empty one, can be
     made the runner's (claim_folder); one with the mark is the runner's already. Anything else (a folder with files
@@ -275,7 +284,9 @@ class WorkspaceRun:
         home = root / HOME_DIR
         chain = (home, root / REPOS_DIR, home / ".arceus", home / ".arceus" / self.KIND, self.out_dir(run),
                  home / "artifacts", home / "artifacts" / run.id)
-        return all(not p.is_symlink() and (p.is_dir() or not p.exists()) for p in chain)
+        if not all(not p.is_symlink() and (p.is_dir() or not p.exists()) for p in chain):
+            return False
+        return own_git(home)
 
     def _pinned(self, run: AgentRun) -> str:
         """The ref a run in a folder of its own keeps each repository's commit in, in the clone."""
@@ -453,6 +464,8 @@ class WorkspaceRun:
                 return
             own = own.resolve()
             linked = [p for p in (own / HOME_DIR, own / REPOS_DIR) if p.is_symlink() or (p.exists() and not p.is_dir())]
+            if not linked and not own_git(own / HOME_DIR):
+                linked = [own / HOME_DIR / ".git"]
             if linked:
                 self._close(run, "unfinished", f"{linked[0]} is a link or not a folder: the runner writes and removes "
                                                f"only in folders of its own under {own}")
@@ -536,6 +549,13 @@ class WorkspaceRun:
                 else:
                     self.emit("pin_lost", task_id=run.id, run=run.n, repo=name, sha=sha)
                     sha = None
+            if sha is None and name in pinned:
+                # Named, and maybe made, before a crash kept its commit: a ref of this run's own name is this run's,
+                # and its commit is the one chosen, whatever the code host's branch says by now.
+                sha = self.git.ref_sha(path, ref)
+                if sha:
+                    pinned[name] = sha
+                    run = self.store.update_run(run.id, snapshot=json.dumps({**snap, "pinned": pinned}))
             if sha is None:
                 pinned[name] = None  # named before the fetch makes it
                 run = self.store.update_run(run.id, snapshot=json.dumps({**snap, "pinned": pinned}))
@@ -622,7 +642,13 @@ class WorkspaceRun:
         elif reply.rc == 6 and not self._overdue(run):
             self.emit("busy", task_id=run.id, run=run.n, reason=reply.why())
         else:
-            self._settled(run, None, f"the execution engine did not accept the run ({reply.why()})")
+            why = f"the execution engine did not accept the run ({reply.why()})"
+            if run.folder and not self._stop_worker(run, why):
+                # The engine may have started a session before it refused: the run is followed as a stop under way
+                # (`stopping`), and nothing is put back until that session is gone.
+                self.store.update_run(run.id, state="running")
+                return
+            self._settled(run, None, why)
 
     def _report_review(self, run: AgentRun) -> ReportReview | None:
         """The kind's review budget for the engine (REPORT_CRITERIA). The criteria go to a file beside the extra
@@ -730,22 +756,16 @@ class WorkspaceRun:
                 return
             self._settled(run, None, "the execution engine lost track of the run")
             return
-        if run.folder and not stopping and not self._owned(run):
-            # Its folder, or a folder on the way to its report, was replaced (a link put in its place): nothing more
-            # is written there or handed to the engine by that path. Its worker is ended by its session's name.
-            why = f"{run.folder} is no longer the runner's folder: the run was stopped"
-            if self._stop_worker(run, why):
-                self._settled(run, show, why)
-            return
-        run = self._note_progress(run)
-        if self._review_pending(run):
-            return
         state = show.get("state")
         live = state in ("queued", "running")
-        # A stop, once begun, is seen through whatever the engine's record says by then: the engine may end the
-        # attempt in its record while the worker's session goes on (Engine.stop_worker), and nothing is put back
-        # under a worker that still runs.
+        # Every stop is seen through before anything of the run is read or sent: one begun before (`stopping`),
+        # whatever the engine's record says by then (it may end the attempt while the worker's session goes on,
+        # Engine.stop_worker); one asked for; the end of its time; or its folder, or a folder on the way to its
+        # report, replaced (a link put in its place), when nothing more is written there or handed to the engine by
+        # that path and its worker is ended by its session's name. Nothing is put back under a worker that still runs.
         why = stopping["why"] if stopping else None
+        if why is None and run.folder and not self._owned(run):
+            why = f"{run.folder} is no longer the runner's folder: the run was stopped"
         if why is None and run.stop_requested:  # also when the record already says the attempt ended
             why = self.stopped
         if why is None and live:
@@ -753,6 +773,9 @@ class WorkspaceRun:
         if why is not None:
             if self._stop_worker(run, why):
                 self._settled(run, show, why)
+            return
+        run = self._note_progress(run)
+        if self._review_pending(run):
             return
         if live:
             if state == "queued" or show.get("attempt_live"):
