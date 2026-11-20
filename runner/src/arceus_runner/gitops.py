@@ -195,6 +195,12 @@ class Git:
                    "--refmap=", "origin", f"+refs/heads/{branch}:{ref}"], repo, network=True)
         return self.ref_sha(repo, ref)
 
+    def git_dirs(self, repo: Path) -> tuple[str, str]:
+        """The repository's own git folder and its common one, as git resolves them (absolute)."""
+        out = self._run(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], repo,
+                        read_only=True).stdout.split("\n")
+        return out[0].strip(), out[1].strip()
+
     def set_ref(self, repo: Path, ref: str, sha: str) -> None:
         self._run(["update-ref", ref, sha], repo)
 

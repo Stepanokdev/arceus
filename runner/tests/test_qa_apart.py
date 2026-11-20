@@ -1159,3 +1159,102 @@ def test_a_stop_under_way_reads_and_sends_nothing_through_a_replaced_home(w, mon
     assert run.state == "done" and read == []
     assert len([c for c in w.calls("worker-send") if RID in c["argv"]]) == sends
     assert not (w.cfg.paths.workspace / "artifacts").exists()
+
+
+def test_a_refused_dispatch_whose_first_stop_tmux_could_not_answer_is_never_dispatched_again(w):
+    """The engine refused, tmux did not answer the first time the session was asked about, the runner restarted,
+    and the engine kept no record of the task: the stop goes on (checkouts and refs kept meanwhile), and once tmux
+    says the session is gone the run closes with the engine's refusal, never dispatched a second time."""
+    w.store.add_run("qa", "command", "ops", scenario=1)
+    w.set_engine(lambda s: (s["next_rc"].update({"dispatch": 2}), s.update(tmux_fails=True)))
+    w.tick()
+    co = checkout(w)
+    run = w.store.run(RID)
+    assert run.state == "running" and json.loads(run.snapshot)["stopping"]["why"].startswith(
+        "the execution engine did not accept the run")
+    assert co.exists() and refs(w, w.repo) != "" and len(dispatches(w)) == 1
+    w.restart()
+    w.tick()
+    assert w.store.run(RID).state == "running" and co.exists() and len(dispatches(w)) == 1
+    w.set_engine(lambda s: s.update(tmux_fails=False))
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and run.reason.startswith("the execution engine did not accept the run")
+    assert len(dispatches(w)) == 1 and not co.exists() and refs(w, w.repo) == ""
+
+
+def test_a_stop_left_in_preparing_by_an_older_runner_is_seen_through_never_dispatched(w):
+    w.store.add_run("qa", "command", "ops", scenario=1)
+    w.set_engine(lambda s: s["next_rc"].update({"dispatch": 6}))
+    w.tick()
+    assert w.store.run(RID).state == "preparing"
+    snap = json.loads(w.store.run(RID).snapshot)
+    w.store.update_run(RID, snapshot=json.dumps({**snap, "stopping": {"why": "the engine refused it"}}))
+    w.tick()
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and run.reason == "the engine refused it" and len(dispatches(w)) == 1
+
+
+def another_task_in_the_folder(w) -> str:
+    """A task of the engine's already at work in the test runs' project (a run before, its worker still live)."""
+    name = session(w)
+    w.set_engine(lambda s: (s["tasks"].update({"qa-0": {"task_id": "qa-0", "state": "running", "attempt_live": True,
+                                                         "project": str(home(w)), "session": name, "attempts": []}}),
+                            s.setdefault("sessions", []).append(name), s.update(busy_by_folder=True)))
+    return name
+
+
+def test_busy_because_another_task_works_in_the_folder_never_touches_that_task(w):
+    w.store.add_run("qa", "command", "ops", scenario=1)
+    home(w).mkdir(parents=True)
+    (qa_root(w) / FOLDER_MARK).write_text("ours\n")
+    other = another_task_in_the_folder(w)
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "preparing" and json.loads(run.snapshot)["asked"] is False
+    w.tick()  # its session is alive, but it is not this run's: no running, no stop
+    assert w.store.run(RID).state == "preparing" and other in sessions(w) and stops(w) == []
+    assert len(dispatches(w)) == 2  # asked again, busy again
+    w.store.update_run(RID, stop_requested=1)
+    w.tick()
+    assert w.store.run(RID).state == "done" and other in sessions(w) and stops(w) == []
+
+
+def test_a_deadline_passed_while_the_engine_said_busy_stops_nothing(w):
+    w.store.add_run("qa", "command", "ops", scenario=1)
+    home(w).mkdir(parents=True)
+    (qa_root(w) / FOLDER_MARK).write_text("ours\n")
+    other = another_task_in_the_folder(w)
+    w.tick()
+    w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and "could not start" in run.reason
+    assert other in sessions(w) and stops(w) == []
+
+
+def test_a_home_git_sharing_the_tickets_metadata_through_commondir_is_never_used(w):
+    take(w)
+    dirty_ticket(w)
+    queue(w)
+    (home(w) / ".git" / "commondir").write_text(str(w.repo / ".git") + "\n")
+    before = ticket_git(w)
+    config = git(w.repo, "config", "--list", "--local")
+    finish(w)
+    run = w.store.run(RID)
+    assert run.state == "done" and "no longer the runner's folder" in run.reason
+    assert ticket_git(w) == before and git(w.repo, "config", "--list", "--local") == config
+
+
+def test_a_home_git_with_commondir_is_refused_when_a_run_is_prepared(w):
+    take(w)
+    home(w).mkdir(parents=True)
+    (qa_root(w) / FOLDER_MARK).write_text("ours\n")
+    subprocess.run(["git", "init", "-q", str(home(w))], check=True)
+    (home(w) / ".git" / "commondir").write_text(str(w.repo / ".git") + "\n")
+    before = ticket_git(w)
+    queue(w)
+    run = w.store.run(RID)
+    assert (run.state, run.outcome) == ("done", "unfinished") and ".git" in run.reason
+    assert ticket_git(w) == before and dispatches(w) == []

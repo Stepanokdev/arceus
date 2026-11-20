@@ -286,7 +286,25 @@ class WorkspaceRun:
                  home / "artifacts", home / "artifacts" / run.id)
         if not all(not p.is_symlink() and (p.is_dir() or not p.exists()) for p in chain):
             return False
-        return own_git(home)
+        return self._home_git_ok(home)
+
+    def _home_git_ok(self, home: Path) -> bool:
+        """`home` has no git yet, or a git of its own: its `.git` a folder (no link, no `gitdir:` file) that git itself
+        takes as both the repository's own and its common folder (no `commondir` sending refs, config or objects'
+        bookkeeping into another repository's, a ticket's)."""
+        if not own_git(home):
+            return False
+        git_dir = home / ".git"
+        if not git_dir.exists():
+            return True
+        if (git_dir / "commondir").exists() or (git_dir / "gitdir").exists():
+            return False
+        try:
+            found = self.git.git_dirs(home)
+        except GitError:
+            return False
+        want = os.path.realpath(git_dir)
+        return all(os.path.realpath(p) == want for p in found)
 
     def _pinned(self, run: AgentRun) -> str:
         """The ref a run in a folder of its own keeps each repository's commit in, in the clone."""
@@ -464,7 +482,7 @@ class WorkspaceRun:
                 return
             own = own.resolve()
             linked = [p for p in (own / HOME_DIR, own / REPOS_DIR) if p.is_symlink() or (p.exists() and not p.is_dir())]
-            if not linked and not own_git(own / HOME_DIR):
+            if not linked and not self._home_git_ok(own / HOME_DIR):
                 linked = [own / HOME_DIR / ".git"]
             if linked:
                 self._close(run, "unfinished", f"{linked[0]} is a link or not a folder: the runner writes and removes "
@@ -631,6 +649,10 @@ class WorkspaceRun:
             hours = self._given(run).total_seconds() / 3600
             self._settled(run, None, f"the run could not start in its {hours:g} h: the engine stayed busy")
             return
+        if run.folder:
+            # Kept before the engine is asked: only a run that asked, and was not told `busy`, may take the folder's
+            # session for its own after a crash (reconcile). A session there otherwise is another task's.
+            run = self._set_snapshot(run, asked=True)
         reply = self.d.engine.dispatch(task_id=run.id, message_id=f"{self.KIND}-{run.id}", author=run.requested_by,
                                        source="other", branch=branch, base=HOME_BRANCH, repo=Path(root),
                                        text=snap["text"], clearance=trusted(snap["text"]), extra_dirs=extra,
@@ -639,14 +661,26 @@ class WorkspaceRun:
             self.store.update_run(run.id, state="running")
             self.emit("dispatched", task_id=run.id, run=run.n, source=run.source, by=run.requested_by,
                       tier=reply.tier, **self.cfg.bulava.model_profile())
-        elif reply.rc == 6 and not self._overdue(run):
-            self.emit("busy", task_id=run.id, run=run.n, reason=reply.why())
+        elif reply.rc == 6:
+            # Busy: the engine started nothing for this run. The folder's session, if any, is another task's: it is
+            # never stopped nor taken for this run's.
+            if run.folder:
+                run = self._set_snapshot(run, asked=False)
+            if self._overdue(run):
+                hours = self._given(run).total_seconds() / 3600
+                self._settled(run, None, f"the run could not start in its {hours:g} h: the engine stayed busy")
+            else:
+                self.emit("busy", task_id=run.id, run=run.n, reason=reply.why())
         else:
             why = f"the execution engine did not accept the run ({reply.why()})"
-            if run.folder and not self._stop_worker(run, why):
-                # The engine may have started a session before it refused: the run is followed as a stop under way
-                # (`stopping`), and nothing is put back until that session is gone.
-                self.store.update_run(run.id, state="running")
+            if run.folder:
+                # The engine may have started the folder's session before it refused. The stop is kept, and the run
+                # followed as running, in one write before the engine is asked anything more: whatever happens next
+                # (tmux not answering, a crash), a later pass goes on with this stop and never dispatches again.
+                snap = {**json.loads(run.snapshot or "{}"), "stopping": {"why": why}}
+                run = self.store.update_run(run.id, state="running", snapshot=json.dumps(snap))
+                if self._stop_worker(run, why):
+                    self._settled(run, None, why)
                 return
             self._settled(run, None, why)
 
@@ -720,9 +754,12 @@ class WorkspaceRun:
                     # the same of a task it has no record of and of one whose record it cannot read: then the
                     # worker's session, kept before the dispatch, says whether one runs.
                     snap = json.loads(run.snapshot or "{}")
-                    if self.d.engine.show(run.id) is not None:
+                    if snap.get("stopping"):
+                        # A stop begun (an older runner's refused dispatch left it so): seen through, never a dispatch.
                         self.store.update_run(run.id, state="running")
-                    elif snap.get("session") and self.d.engine.session_alive(snap["session"]):
+                    elif self.d.engine.show(run.id) is not None:
+                        self.store.update_run(run.id, state="running")
+                    elif snap.get("asked") and snap.get("session") and self.d.engine.session_alive(snap["session"]):
                         self.store.update_run(run.id, state="running")
                     elif run.stop_requested:
                         self._settled(run, None, self.stopped)
@@ -794,6 +831,10 @@ class WorkspaceRun:
         # checkouts stay until it has.
         if self._worker_gone(run):
             self._settled(run, show)
+
+    def _set_snapshot(self, run: AgentRun, **fields) -> AgentRun:
+        snap = {**json.loads(self.store.run(run.id).snapshot or "{}"), **fields}
+        return self.store.update_run(run.id, snapshot=json.dumps(snap))
 
     def _session(self, run: AgentRun) -> str:
         """The run's worker's tmux session: as kept before it was dispatched, else as the engine names its folder's
