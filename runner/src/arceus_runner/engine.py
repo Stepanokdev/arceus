@@ -300,10 +300,15 @@ class Engine:
         return f"night-{base}-{hashlib.sha1(real.encode()).hexdigest()[:12]}"
 
     def folder_task(self, repo: Path) -> str | None:
-        """The task the engine last started in `repo` (dispatch.sh writes its id into the folder's instance, as
-        `task-id`, after it has decided the folder is not busy), or None when it names none. A session in the folder
-        is a task's only if this names it."""
-        slug = self.folder_session(repo).removeprefix("night-")
+        """The task the engine last started in `repo`: `session_task` of the folder's session."""
+        return self.session_task(self.folder_session(repo))
+
+    def session_task(self, session: str) -> str | None:
+        """The task the engine last started in the folder whose session this is (dispatch.sh writes its id into the
+        folder's instance, as `task-id`, once it has decided the folder is not busy, after it has started the
+        session), or None when it names none. Asked by the session's kept name, never by a path that may have been
+        replaced since."""
+        slug = session.removeprefix("night-")
         try:
             return (self.cfg.paths.bulava_state / "instances" / slug / "task-id").read_text().strip() or None
         except FileNotFoundError:

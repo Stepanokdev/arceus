@@ -1391,3 +1391,59 @@ def test_a_runner_that_died_before_it_recorded_busy_never_takes_the_other_worker
     w.set_engine(lambda s: (s["sessions"].remove(other), s["tasks"].pop("qa-0")))
     w.tick()
     assert w.store.run(RID).state == "running" and dispatches(w)[-1]["argv"][-2] == str(home(w))
+
+
+@pytest.mark.parametrize("named", ["none", "an earlier run"])
+@pytest.mark.parametrize("then", ["stop", "deadline"])
+def test_a_start_cut_off_between_the_session_and_its_record_is_still_the_runs_to_stop(w, monkeypatch, named, then):
+    """The engine started the folder's session and the runner died before the engine named the task (`task-id`
+    absent, or still an earlier, finished run's). After the restart the session is this run's own: a stop or the
+    end of its time ends it, and only then are the checkouts and refs put back; it is never dispatched again."""
+    engine = w.runner.qa.d.engine
+    name = session(w)
+    instance = w.cfg.paths.bulava_state / "instances" / name.removeprefix("night-")
+
+    def session_then_die(**kw):
+        w.set_engine(lambda s: s.setdefault("sessions", []).append(name))
+        instance.mkdir(parents=True, exist_ok=True)
+        if named == "none":
+            (instance / "task-id").unlink(missing_ok=True)
+        else:
+            (instance / "task-id").write_text("qa-0\n")  # the engine has no running qa-0: an earlier run's
+        raise OSError("the runner dies before the engine names the task")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", session_then_die)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    assert w.store.run(RID).state == "preparing" and name in sessions(w)
+    w.restart()
+    if then == "stop":
+        w.store.update_run(RID, stop_requested=1)
+    else:
+        w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+    w.tick()
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and name not in sessions(w) and gone_before_restored(w)
+    assert not checkout(w).exists() and refs(w, w.repo) == "" and dispatches(w) == []
+
+
+def test_a_preparing_run_whose_home_became_a_link_waits_for_its_own_worker_by_its_kept_name(w):
+    """Dispatched, the runner died before it wrote `running`, the engine's record cannot be read, and home was
+    replaced by a link to the ticket's workspace: the owner is asked by the session's kept name, never by the
+    path; the run's own worker is waited for and, when stopped, ended by that name, and the ticket's is untouched."""
+    take(w)
+    queue(w)
+    name = session(w)
+    w.store.update_run(RID, state="preparing")
+    w.set_engine(lambda s: s["tasks"].pop(RID))
+    replace_home_with_link(w)
+    w.tick()
+    w.tick()
+    assert w.store.run(RID).state == "running" and name in sessions(w) and refs(w, w.repo) != ""
+    w.store.update_run(RID, stop_requested=1)
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and name not in sessions(w) and gone_before_restored(w)
+    assert session(w, w.cfg.paths.workspace) in sessions(w) and w.store.task("ACME-1").state == "dispatched"
+    assert str(w.cfg.paths.workspace) not in stops(w) and refs(w, w.repo) == ""
