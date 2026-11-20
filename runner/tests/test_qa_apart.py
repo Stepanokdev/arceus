@@ -269,8 +269,10 @@ def test_a_checkout_left_by_a_run_that_was_never_put_back_is_replaced(w):
     queue(w)
     co = checkout(w)
     old = git(co, "rev-parse", "HEAD")
-    # The run's record is lost, as if the runner's database were restored from before it: its checkout stays.
+    # The run's record is lost, as if the runner's database were restored from before it: its checkout stays, and
+    # its worker is gone.
     w.store.update_run(RID, state="done")
+    w.set_engine(lambda s: s["sessions"].remove(session(w)))
     unlock(co)
     (co / "junk.txt").write_text("left\n")
     newer = push_main(w)
@@ -1113,13 +1115,20 @@ def test_a_ref_made_before_a_crash_kept_its_commit_is_the_one_read(w, monkeypatc
     assert json.loads(w.store.run(RID).snapshot)["pinned"]["acme-platform"] == chosen
 
 
-def test_a_dispatch_the_engine_refused_after_starting_a_session_waits_for_it(w):
+def test_a_dispatch_the_engine_refused_after_starting_a_session_waits_for_it(w, monkeypatch):
     """The engine may start the folder's session and then refuse (exit 2): the run's checkouts stay until that
     session is gone, and while tmux cannot say, they stay too."""
-    w.store.add_run("qa", "command", "ops", scenario=1)
-    w.set_engine(lambda s: (s["next_rc"].update({"dispatch": 2}), s.setdefault("sessions", []).append(session(w)),
-                            s.update(unkillable=[session(w)])))
-    w.tick()
+    engine = w.runner.qa.d.engine
+    real = engine.dispatch
+
+    def starts_then_refuses(**kw):
+        w.set_engine(lambda s: (s["next_rc"].update({"dispatch": 2}), s.setdefault("sessions", []).append(session(w)),
+                                s.update(unkillable=[session(w)])))
+        return real(**kw)
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", starts_then_refuses)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
     co = checkout(w)
     run = w.store.run(RID)
     assert run.state == "running" and co.exists() and refs(w, w.repo) != ""
@@ -1161,13 +1170,20 @@ def test_a_stop_under_way_reads_and_sends_nothing_through_a_replaced_home(w, mon
     assert not (w.cfg.paths.workspace / "artifacts").exists()
 
 
-def test_a_refused_dispatch_whose_first_stop_tmux_could_not_answer_is_never_dispatched_again(w):
+def test_a_refused_dispatch_whose_first_stop_tmux_could_not_answer_is_never_dispatched_again(w, monkeypatch):
     """The engine refused, tmux did not answer the first time the session was asked about, the runner restarted,
     and the engine kept no record of the task: the stop goes on (checkouts and refs kept meanwhile), and once tmux
     says the session is gone the run closes with the engine's refusal, never dispatched a second time."""
-    w.store.add_run("qa", "command", "ops", scenario=1)
-    w.set_engine(lambda s: (s["next_rc"].update({"dispatch": 2}), s.update(tmux_fails=True)))
-    w.tick()
+    engine = w.runner.qa.d.engine
+    real = engine.dispatch
+
+    def refused_and_tmux_gone(**kw):
+        w.set_engine(lambda s: (s["next_rc"].update({"dispatch": 2}), s.update(tmux_fails=True)))
+        return real(**kw)
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", refused_and_tmux_gone)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
     co = checkout(w)
     run = w.store.run(RID)
     assert run.state == "running" and json.loads(run.snapshot)["stopping"]["why"].startswith(
@@ -1197,7 +1213,8 @@ def test_a_stop_left_in_preparing_by_an_older_runner_is_seen_through_never_dispa
 
 
 def another_task_in_the_folder(w) -> str:
-    """A task of the engine's already at work in the test runs' project (a run before, its worker still live)."""
+    """A task of the engine's already at work in the test runs' folder (a run before, its worker still live), with
+    a home of its own: a branch, something staged, and its checkout in repos."""
     name = session(w)
     w.set_engine(lambda s: (s["tasks"].update({"qa-0": {"task_id": "qa-0", "state": "running", "attempt_live": True,
                                                          "project": str(home(w)), "session": name, "attempts": []}}),
@@ -1205,33 +1222,83 @@ def another_task_in_the_folder(w) -> str:
     return name
 
 
-def test_busy_because_another_task_works_in_the_folder_never_touches_that_task(w):
-    w.store.add_run("qa", "command", "ops", scenario=1)
-    home(w).mkdir(parents=True)
+def its_files(w) -> dict:
+    """Everything of the folder another worker may be using: the home's branch, HEAD, index, files; the checkouts."""
+    h = home(w)
+    files = sorted(str(p.relative_to(qa_root(w))) for p in qa_root(w).rglob("*")
+                   if ".git" not in p.relative_to(qa_root(w)).parts)
+    return {"branch": git(h, "branch", "--show-current"), "head": git(h, "rev-parse", "HEAD"),
+            "index": git(h, "diff", "--cached", "--name-only"), "files": files}
+
+
+def occupied_folder(w) -> str:
+    """The folder, claimed, with another task's home and checkout in it and that task's worker alive."""
+    h = home(w)
+    h.mkdir(parents=True)
     (qa_root(w) / FOLDER_MARK).write_text("ours\n")
-    other = another_task_in_the_folder(w)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(h)], check=True)
+    (h / "AGENTS.md").write_text("theirs\n")
+    git(h, "add", "AGENTS.md")
+    git(h, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "home")
+    git(h, "switch", "-q", "-c", "arceus-qa/0")
+    (h / "staged.txt").write_text("staged by the other run\n")
+    git(h, "add", "staged.txt")
+    (qa_root(w) / "repos" / "acme-platform").mkdir(parents=True)
+    (qa_root(w) / "repos" / "acme-platform" / "in-use.txt").write_text("the other run reads this\n")
+    return another_task_in_the_folder(w)
+
+
+def test_another_worker_in_the_folder_keeps_everything_of_it_through_waiting_and_a_stop(w):
+    w.store.add_run("qa", "command", "ops", scenario=1)
+    other = occupied_folder(w)
+    before = its_files(w)
+    w.tick()
     w.tick()
     run = w.store.run(RID)
-    assert run.state == "preparing" and json.loads(run.snapshot)["asked"] is False
-    w.tick()  # its session is alive, but it is not this run's: no running, no stop
-    assert w.store.run(RID).state == "preparing" and other in sessions(w) and stops(w) == []
-    assert len(dispatches(w)) == 2  # asked again, busy again
+    assert run.state == "pending" and dispatches(w) == []
+    assert w.events_named("qa_waits")[-1]["reason"] == "folder_busy"
+    assert its_files(w) == before and other in sessions(w) and refs(w, w.repo) == ""
     w.store.update_run(RID, stop_requested=1)
     w.tick()
-    assert w.store.run(RID).state == "done" and other in sessions(w) and stops(w) == []
+    assert w.store.run(RID).state == "done" and its_files(w) == before and other in sessions(w) and stops(w) == []
 
 
-def test_a_deadline_passed_while_the_engine_said_busy_stops_nothing(w):
-    w.store.add_run("qa", "command", "ops", scenario=1)
-    home(w).mkdir(parents=True)
-    (qa_root(w) / FOLDER_MARK).write_text("ours\n")
-    other = another_task_in_the_folder(w)
+@pytest.mark.parametrize("then", ["retry", "stop", "deadline"])
+def test_a_worker_that_took_the_folder_during_the_dispatch_keeps_everything_of_it(w, monkeypatch, then):
+    """The folder was free when the run was prepared, and another task's worker took it in the moment of the
+    dispatch (busy). From then on nothing of the folder is touched, whether the run asks again, is stopped or runs
+    out of time, until that worker has gone."""
+    engine = w.runner.qa.d.engine
+    real = engine.dispatch
+
+    def taken_meanwhile(**kw):
+        another_task_in_the_folder(w)
+        return real(**kw)
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", taken_meanwhile)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    run = w.store.run(RID)
+    assert run.state == "preparing" and json.loads(run.snapshot)["asked"] is False
+    other = session(w)
+    before = its_files(w)
+    n = len(dispatches(w))
+    if then == "stop":
+        w.store.update_run(RID, stop_requested=1)
+    elif then == "deadline":
+        w.now += w.cfg.qa.timeout + timedelta(minutes=1)
     w.tick()
-    w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+    w.tick()
+    assert w.store.run(RID).state == "preparing" and len(dispatches(w)) == n
+    assert its_files(w) == before and other in sessions(w) and stops(w) == []
+    # The other worker goes: now the run goes on (stopped, out of time, or dispatched).
+    w.set_engine(lambda s: (s["sessions"].remove(other), s["tasks"].pop("qa-0")))
     w.tick()
     run = w.store.run(RID)
-    assert run.state == "done" and "could not start" in run.reason
-    assert other in sessions(w) and stops(w) == []
+    if then == "retry":
+        assert run.state == "running" and len(dispatches(w)) == n + 1
+    else:
+        assert run.state == "done" and len(dispatches(w)) == n
 
 
 def test_a_home_git_sharing_the_tickets_metadata_through_commondir_is_never_used(w):

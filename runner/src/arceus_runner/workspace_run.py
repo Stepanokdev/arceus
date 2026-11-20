@@ -488,6 +488,8 @@ class WorkspaceRun:
                 self._close(run, "unfinished", f"{linked[0]} is a link or not a folder: the runner writes and removes "
                                                f"only in folders of its own under {own}")
                 return
+            if self._foreign_worker(run, own / HOME_DIR):
+                return
             if not run.folder:
                 # Kept before anything changes in git: whatever this run does in a clone from here on, a later pass
                 # (after a crash, a stop) finds it named here.
@@ -602,6 +604,8 @@ class WorkspaceRun:
         ws = self.cfg.paths.workspace
         root = self.root(run)
         branch = snap["branch"]
+        if run.folder and self._foreign_worker(run, root):
+            return
         if self._overdue(run):
             # Its time ran out while the engine was busy (or the runner was down): it never starts late.
             hours = self._given(run).total_seconds() / 3600
@@ -762,7 +766,8 @@ class WorkspaceRun:
                     elif snap.get("asked") and snap.get("session") and self.d.engine.session_alive(snap["session"]):
                         self.store.update_run(run.id, state="running")
                     elif run.stop_requested:
-                        self._settled(run, None, self.stopped)
+                        if not (run.folder and self._foreign_worker(run, self.root(run))):
+                            self._settled(run, None, self.stopped)
                     else:
                         self._dispatch(run)
                 elif run.state == "running":
@@ -831,6 +836,19 @@ class WorkspaceRun:
         # checkouts stay until it has.
         if self._worker_gone(run):
             self._settled(run, show)
+
+    def _foreign_worker(self, run: AgentRun, home: Path) -> bool:
+        """Whether a worker that is not this run's is at work in the folder (`home`): the engine's session of that
+        folder is alive while this run has not asked the engine to start (or was answered `busy`). Then nothing of
+        the folder is touched, its checkouts, its home's branch and index, until it has gone: the run waits, and an
+        error asking tmux is an error, never "free". True while one is there."""
+        if json.loads(run.snapshot or "{}").get("asked"):
+            return False
+        session = self.d.engine.folder_session(Path(home))
+        if not self.d.engine.session_alive(session):
+            return False
+        self._note_waiting(run, "folder_busy", session=session)
+        return True
 
     def _set_snapshot(self, run: AgentRun, **fields) -> AgentRun:
         snap = {**json.loads(self.store.run(run.id).snapshot or "{}"), **fields}
