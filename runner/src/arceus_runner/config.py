@@ -618,6 +618,10 @@ class QaConfig(Strict):
     # edit never changes what a run was asked.
     instructions: ExpandedPath = Path("~/arceus/data/qa/instructions.md").expanduser()
     reports: ExpandedPath = Path("~/arceus/data/qa/runs").expanduser()
+    # A folder of the test runs' own, outside paths.workspace: a run then reads the code there, in a checkout of each
+    # repository at its default branch that borrows the clone's objects (git clone --shared), and works beside a ticket.
+    # None: runs share the workspace and take turns with tickets.
+    workspace: ExpandedPath | None = None
     # Read once: the first time the runner starts with scenarios it gives this schedule to the first scenario, and
     # from then on each scenario's own schedule is the one that counts. `arceus-runner check` asks to remove it.
     schedule: RunSchedule | None = None
@@ -1032,6 +1036,17 @@ class Config(Strict):
         if a.secrets == self.paths.secrets:
             raise ValueError("assistant.secrets must be a file of its own, not the runner's secrets.env: the runner "
                              "and its agents must never get the assistant's keys")
+        return self
+
+    @model_validator(mode="after")
+    def _qa_workspace(self) -> Config:
+        own = self.qa.workspace
+        if own is None:
+            return self
+        own, ws = own.resolve(), self.paths.workspace.resolve()
+        if own == ws or own.is_relative_to(ws) or ws.is_relative_to(own):
+            raise ValueError(f"qa.workspace ({own}) must be a folder of its own beside paths.workspace ({ws}), not "
+                             "it, inside it or above it: a ticket's agent works there")
         return self
 
     @model_validator(mode="after")

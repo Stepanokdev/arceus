@@ -3,7 +3,9 @@ in it. Who holds it (a ticket's task, a code review, a test run or an architectu
 go ahead, and getting the repositories and the home ready for whoever does.
 
 The rule "one at a time" lives here alone: a ticket's task, a `/continue`, a code review and a background run all
-ask `Workspace.taken` before they switch a branch. Nothing here changes a task's state; the callers do."""
+ask `Workspace.taken` before they switch a branch. A test run in a folder of its own (qa.workspace) switches nothing
+here and is no holder: it works beside whoever holds the workspace. Nothing here changes a task's state; the callers
+do."""
 
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from arceus_runner.integrations import CodeHost, Repo, usable_repos
 from arceus_runner.texts import START_REFUSED, ProjectNotesError, home_files, project_notes
 
 PREPARED_MARK = "arceus-prepared"
+PREPARED_PATHS = "arceus-prepared-paths"  # in a home's .git: the checkouts below it trusted so (prepare_checkout)
 
 
 class Holder(Protocol):
@@ -114,18 +117,32 @@ class Workspace:
                          sha256=hashlib.sha256(notes.encode()).hexdigest())
         return notes
 
-    def prepare_home(self, repos: list[Repo], notes: str) -> None:
+    def prepare_home(self, repos: list[Repo], notes: str, home: Path | None = None, reading: bool = False) -> None:
         """The workspace folder as the git project Bulava runs in, on main with these notes: the task's own
-        (task_notes). The branch of whatever runs next starts from this commit."""
-        home = self.cfg.paths.workspace
+        (task_notes). The branch of whatever runs next starts from this commit. `home`: a folder of a run's own
+        (a test run's beside a ticket, workspace_run.py) made so in the same way, its instructions to read the code
+        there and change nothing (`reading`)."""
+        home = home or self.cfg.paths.workspace
         h = self.host
-        files = home_files(f"{h.label} {h.scope_kind} `{h.scope}`", repos, home.resolve(), notes)
+        files = home_files(f"{h.label} {h.scope_kind} `{h.scope}`", repos, home.resolve(), notes, reading=reading)
         if self.git.write_home(home, files, f"Arceus: workspace of {h.label} {h.scope_kind} {h.scope}"):
             self.events.emit("workspace_home_updated", path=str(home), repos=len(repos),
                              project_notes=len(notes.encode()), commit=self.git.head(home))
         if not (home / ".git" / PREPARED_MARK).exists():
             self.engine.prepare_repo(home)
             (home / ".git" / PREPARED_MARK).write_text("trust, mcp-decide skip\n")
+
+    def prepare_checkout(self, home: Path, path: Path) -> None:
+        """A checkout below a home of its own (Git.checkout_at) trusted for Claude and its MCP servers decided, once
+        per path. Its `.git` is a file, so the home keeps the list of paths done; the path stays the same from run to
+        run, so a later run needs nothing."""
+        mark = home / ".git" / PREPARED_PATHS
+        done = set(mark.read_text().splitlines()) if mark.exists() else set()
+        if str(path) in done:
+            return
+        self.engine.prepare_repo(path)
+        with mark.open("a") as f:
+            f.write(f"{path}\n")
 
     def extra_dirs_file(self, task: Task) -> Path | None:
         extras = json.loads(task.extra_repos or "[]")

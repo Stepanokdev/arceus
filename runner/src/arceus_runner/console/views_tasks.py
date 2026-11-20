@@ -135,9 +135,10 @@ def _continue_until(cfg: Config, task) -> str:
     return f"{datetime.fromtimestamp(until, cfg.schedule.tz):%d %b %Y, %H:%M}"
 
 
-def _ahead(store: ReviewStore) -> str:
+def _ahead(store: ReviewStore, cfg: Config) -> str:
     """What the runner starts before a queued ticket (delivery.maybe_start): people's comments for an open MR, a
-    `/continue`, a code review or a test run or architecture review waiting."""
+    `/continue`, a code review or a test run or architecture review waiting. Not a test run that will work in a folder
+    of its own (qa.workspace): it starts beside the ticket."""
     if store.has_pending_review():
         return "Review comments for an open merge request"
     if store.pending_continues():
@@ -145,7 +146,8 @@ def _ahead(store: ReviewStore) -> str:
     review = next(iter(store.reviews("pending")), None)
     if review:
         return f"Code review {review.n} of {review.task_id}"
-    run = next(iter(store.runs(None, "pending")), None)
+    run = next((r for r in store.runs(None, "pending") if not (r.kind == "qa" and cfg.qa.workspace is not None)),
+               None)
     if run:
         return f"{status.RUN_WORDS[run.kind][0]}, run {run.n}"
     return ""
@@ -189,7 +191,7 @@ def gather(cfg: Config, key: str, config_path, now: float | None = None) -> dict
             holder="" if holder == key else holder, can_take=m.can_take, mode=mode, drain_by=drain,
             review=(under_way.n, under_way.state) if under_way and state == "code_review" else None,
             fixes_waiting=taken and state == "code_review" and ex.fixes_waiting(store, key),
-            ahead=_ahead(store) if state == "queued" else "",
+            ahead=_ahead(store, cfg) if state == "queued" else "",
             reason=(task.reason or "") if taken else "",
             continue_until=_continue_until(cfg, task) if taken else "")
         why = ex.reason(facts)

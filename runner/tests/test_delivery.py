@@ -69,7 +69,12 @@ class World:
     def __init__(self, tmp: Path, secrets, engine_dir: Path | None = None, engine_env: dict | None = None,
                  settings: dict | None = None):
         self.tmp = tmp
-        self.engine_env = engine_env or {}
+        # The engine's tmux server is the fake engine's too (fake_engine.tmux): no test ever asks a real tmux.
+        fakebin = tmp / "fakebin"
+        fakebin.mkdir(parents=True, exist_ok=True)
+        (fakebin / "tmux").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_ENGINE}" tmux "$@"\n')
+        (fakebin / "tmux").chmod(0o755)
+        self.engine_env = {"PATH": f"{fakebin}:/usr/local/bin:/usr/bin:/bin", **(engine_env or {})}
         if engine_dir is None:
             engine_dir = tmp / "engine"
             (engine_dir / "bin").mkdir(parents=True)

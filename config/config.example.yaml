@@ -173,6 +173,7 @@ qa:
   enabled: false
   instructions: ~/arceus/data/qa/instructions.md   # the first scenario's; later ones get scenarios/<n>.md beside it
   reports: ~/arceus/data/qa/runs                   # report.html, result.json, media/ per run
+  # workspace: ~/arceus/qa-workspace               # a folder of their own: runs then work beside tickets (qa.md)
   # max_scenarios: 20                              # scenarios that exist at once
   # schedule: read once, to give the first scenario a schedule when upgrading; scenarios have their own now
   timeout: 8h                                      # past it the run stops, reported as unfinished

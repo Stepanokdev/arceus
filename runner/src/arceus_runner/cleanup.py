@@ -140,8 +140,12 @@ class Owners:
 
     def __init__(self, tasks: list[Task], holds: list[tuple[str, str, str | None]], now: datetime,
                  continue_window: timedelta, resuming: set[str] = frozenset(),
-                 release_after: timedelta | None = None, quiet: Callable[[str], bool] | None = None):
+                 release_after: timedelta | None = None, quiet: Callable[[str], bool] | None = None,
+                 runs: list | None = None):
         self.tasks = {t.task_id: t for t in tasks}
+        # Background runs (db.AgentRun: qa-<n>, arch-<n>), by id: what is labelled `arceus.task=<run id>` is theirs.
+        # Working while queued or under way, over once done; no `/continue` waits for them.
+        self.runs = {r.id: r for r in runs or []}
         # A `/continue` was accepted and waits to be sent, or review comments wait for the agent: whenever that
         # goes, the task needs all it has.
         self.resuming = resuming
@@ -156,7 +160,10 @@ class Owners:
         """working | waiting (keeps everything) | over | unknown."""
         t = self.tasks.get(key)
         if t is None:
-            return "unknown"
+            run = self.runs.get(key)
+            if run is None:
+                return "unknown"
+            return "over" if run.state == "done" else "working"
         if t.state in ACTIVE_STATES:
             return "working"
         if t.state == "done" or (t.state == "stopped" and not t.failed_at_ms):
@@ -201,6 +208,9 @@ class Owners:
         return f"which has waited {_span(idle)} with no work" if idle is not None else None
 
     def over_for(self, key: str) -> timedelta:
+        if key not in self.tasks and key in self.runs:
+            run = self.runs[key]
+            return self.now - (_ts(run.finished_at) or _ts(run.updated_at) or self.now)
         t = self.tasks[key]
         since = (self._failed_at(t) + self.window) if t.state in ("failed", "stopped") and t.failed_at_ms and t.branch \
             else (_ts(t.updated_at) or self.now)
@@ -253,6 +263,9 @@ class Situation:
     work_waiting: bool       # a ticket, a review round or a `/continue` would start this tick
     disk_pressure: bool      # health says the disk is low
     since: datetime | None = None  # the tick's start: a change of holder happened somewhere after it
+    # A test run at work in a folder of its own: it holds nothing of the workspace (nothing made there is its by
+    # time), but an agent is at work, so no full pass, which needs the machine quiet.
+    apart: bool = False
 
 
 Advise = Callable[[dict], list[tuple[int, str, str]]]
@@ -343,7 +356,7 @@ class Cleanup:
     def due(self, sit: Situation) -> tuple[str | None, str | None]:
         """(trigger of a full pass, trigger of an independent one), each None when not due."""
         now = self.now()
-        free = sit.holder is None
+        free = sit.holder is None and not sit.apart
         self.idle_since = (self.idle_since or now) if free and not sit.work_waiting else None
         runs = [r for r in self.store.cleanup_runs() if r["mode"] == self.mode and r["status"] != "running"]
         ok = [r for r in runs if r["status"] == "succeeded"]
@@ -390,8 +403,12 @@ class Cleanup:
             (reviews() if reviews else set())
 
     def _owners(self) -> Owners:
+        # What a background run labelled as its own is its by the label (a test run in a folder of its own never
+        # holds the workspace, so time puts nothing down to it); its run says whether it is over.
+        runs = self.store.runs(None) if hasattr(self.store, "runs") else []
         return Owners(self.store.tasks(), self.store.workspace_holds(), self.now(),
-                      self.cfg.limits.continue_window, self._resuming(), self.c.release_after, self._quiet)
+                      self.cfg.limits.continue_window, self._resuming(), self.c.release_after, self._quiet,
+                      runs=runs)
 
     def _quiet(self, key: str) -> bool:
         """No live engine session for a waiting task, by the engine's own word. One that does not answer is not

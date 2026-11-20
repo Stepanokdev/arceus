@@ -7,6 +7,7 @@ are never in it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -92,6 +93,29 @@ def parse_reply(rc: int, stdout: str, stderr: str) -> Reply:
             except ValueError:
                 pass
     return Reply(rc, tier, data, stderr)
+
+
+# engine/SERVER.md, "States": every state `task show` gives a task.
+TASK_STATES = ("queued", "running", "waiting_review", "done", "needs_input", "blocked", "failed")
+
+
+def _malformed(record) -> str:
+    """Why a `task show` record cannot be read as engine/SERVER.md gives it, or ""."""
+    if not isinstance(record, dict):
+        return "the record is not an object"
+    kinds = {"state": (str,), "state_reason": (str, type(None)), "attempt_live": (bool, type(None)),
+             "attempts": (list, type(None)), "receipt": (dict, type(None)), "outcome": (dict, type(None)),
+             "question": (dict, type(None)), "repos": (list, type(None))}
+    if record.get("state") not in TASK_STATES:
+        return f"its state {str(record.get('state'))[:40]!r} is none the engine names"
+    if record["state"] in ("queued", "running") and not isinstance(record.get("attempt_live"), bool):
+        return f"a {record['state']} record does not say whether its attempt is live"
+    for key, allowed in kinds.items():
+        if key in record and not isinstance(record[key], allowed):
+            return f"its {key} is a {type(record[key]).__name__}"
+    if any(not isinstance(a, dict) for a in record.get("attempts") or []):
+        return "an attempt in it is not an object"
+    return ""
 
 
 class Engine:
@@ -241,9 +265,14 @@ class Engine:
                 return None
             raise EngineError(f"task show {task_id}: exit {r.returncode}: {r.stderr.strip()[-300:]}")
         try:
-            return json.loads(r.stdout)
+            record = json.loads(r.stdout)
         except ValueError:
             raise EngineError(f"task show {task_id}: not JSON: {r.stdout[:200]}") from None
+        why = _malformed(record)
+        if why:
+            # Nothing is decided from a record of this shape (resumed, settled, put back): try again later.
+            raise EngineError(f"task show {task_id}: {why}")
+        return record
 
     def prepare_repo(self, repo: Path) -> None:
         """Once per repository: trust it for Claude and decide its MCP servers (skip)."""
@@ -254,3 +283,74 @@ class Engine:
 
     def stop(self, repo: Path) -> None:
         self._run([str(self.bin / "night-shift.sh"), "stop", str(repo)], timeout=120)
+
+    # `night-shift stop <folder>` ends the folder's run in the engine's record (task show: attempt_live false) but
+    # leaves the worker's tmux session, `night-<slug>`, and whatever runs in it, alive (night-shift.sh stop_instance:
+    # «сесія залишена»). Before the runner takes a folder's files away from under a worker, it ends that session
+    # itself and checks it is gone.
+
+    @staticmethod
+    def folder_session(repo: Path) -> str:
+        """The tmux session of whatever worker the engine runs in `repo`: one folder, one session, named from the
+        folder alone (engine/bin/supervisor-lib.sh: session_name of slug_for, the folder's name and the first 12 hex
+        digits of the SHA-1 of its real path). Known without the engine's record of any task, so a record that is
+        gone or cannot be read never leaves the runner guessing which worker to wait for."""
+        real = os.path.realpath(repo) if os.path.isdir(repo) else str(repo)  # canon_path: `cd && pwd -P`, else as is
+        base = re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9]", "-", os.path.basename(real))).strip("-") or "proj"
+        return f"night-{base}-{hashlib.sha1(real.encode()).hexdigest()[:12]}"
+
+    def _tmux_args(self) -> tuple[dict[str, str], list[str]]:
+        """tmux as the engine calls it: on a server its workers live in a tmux server of the engine's own, `-L
+        bulava` unless SUPERVISOR_TMUX_SOCKET names another (engine/supervisor/config.sh). Asked anywhere else, tmux
+        would say there is no such session while the worker runs."""
+        env = self.env()
+        sock = env.get("SUPERVISOR_TMUX_SOCKET") or ("bulava" if env.get("SUPERVISOR_PROFILE") == "server" else "")
+        return env, ["tmux", *(["-L", sock] if sock else [])]
+
+    def _tmux(self, *args: str) -> int:
+        env, tmux = self._tmux_args()
+        try:
+            # Never a pipe: a tmux that starts its server would hold it open, and the wait would never end.
+            return subprocess.run([*tmux, *args], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=60).returncode
+        except FileNotFoundError:
+            raise EngineError("tmux is not on PATH: whether the worker's session is gone cannot be told") from None
+        except subprocess.TimeoutExpired:
+            raise EngineError("tmux: timed out") from None
+
+    def session_alive(self, session: str) -> bool:
+        """Whether the tmux server has that session. "No" only when tmux says so: it lists its sessions and this is
+        not among them, or no server runs at all. Any other failure is an EngineError, never taken for "gone"."""
+        env, tmux = self._tmux_args()
+        try:
+            r = subprocess.run([*tmux, "list-sessions", "-F", "#{session_name}"], env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=60)
+        except FileNotFoundError:
+            # Without tmux nothing tells whether the worker is gone; never taken for "gone".
+            raise EngineError("tmux is not on PATH: whether the worker's session is gone cannot be told") from None
+        except subprocess.TimeoutExpired:
+            raise EngineError("tmux: timed out") from None
+        if r.returncode == 0:
+            return session in r.stdout.splitlines()
+        why = r.stderr.strip()
+        if "no server running" in why or ("error connecting to" in why and "No such file or directory" in why):
+            return False
+        raise EngineError(f"tmux list-sessions: exit {r.returncode}: {why[-300:]}")
+
+    def stop_worker(self, repo: Path, session: str | None = None) -> bool:
+        """The run in `repo` stopped in the engine and its worker's session (`folder_session`) ended. True once that
+        session is gone; an engine that refuses the stop, or a tmux that cannot say, is an EngineError, to try
+        again."""
+        r = self._run([str(self.bin / "night-shift.sh"), "stop", str(repo)], timeout=120)
+        if r.returncode != 0:
+            raise EngineError(f"night-shift stop {repo}: exit {r.returncode}: {r.stderr.strip()[-300:]}")
+        return self.end_session(repo, session)
+
+    def end_session(self, repo: Path, session: str | None = None) -> bool:
+        """The worker's session of `repo` ended, once its attempt is over in the engine's record (the engine lets it
+        go itself a few seconds after; this does not wait for that). True once tmux no longer has it. `session`: its
+        name as recorded when the run was dispatched, which holds even if the folder has gone since."""
+        session = session or self.folder_session(repo)
+        if self.session_alive(session):
+            self._tmux("kill-session", "-t", f"={session}")
+        return not self.session_alive(session)

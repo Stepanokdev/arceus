@@ -189,7 +189,9 @@ run only by hand. A line under them says which it will be as they are picked, an
 scenario changes its name and schedule and deletes it; a save over a scenario someone changed since the page was opened
 is refused, with what is saved now said and the person's own changes still in the form. A deleted scenario leaves the
 list; its past runs keep its name. **Run now** queues a run of that scenario, refused while one of the same scenario is
-queued or under way; runs of different scenarios wait behind each other. At `qa.max_scenarios` the page says so instead
+queued or under way; runs of different scenarios wait behind each other. A queued run's page says what it waits for: the
+run under way, and in the shared workspace also whatever holds it; with `qa.workspace` a ticket never waits for a test
+run, nor a test run for a ticket. At `qa.max_scenarios` the page says so instead
 of offering a new one. What a scenario runs and when is read by the runner on its next pass, without a restart.
 
 Below the scenarios, the list of every run of the platform test, newest first, queued and running ones included, each

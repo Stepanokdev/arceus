@@ -27,7 +27,7 @@ from arceus_runner.integrations import build_code_host, build_tracker
 from arceus_runner.loop import IntegrationChanged, LiveModeUnavailable, make_cleanup, require_mode_ready, run
 from arceus_runner.notify import test_message, webhook_state
 from arceus_runner.qa import scenario_name
-from arceus_runner.workspace_run import read_instructions, report_address
+from arceus_runner.workspace_run import folder_problem, read_instructions, report_address
 from arceus_runner.slack import Webhook
 
 EXIT_OK = 0
@@ -126,6 +126,10 @@ def qa_check(cfg: Config) -> list[Check]:
         if text is None:
             bad.append(f"\u201c{name}\u201d: {why}")
     listed = "; ".join(f"{name} ({when.lower()})" for name, _, when in scenarios)
+    if q.workspace is not None:
+        why = folder_problem(q.workspace)
+        if why:
+            out.append(Check("config.qa.workspace", "fail", f"{why}: no test run would start"))
     if bad:
         return [Check("config.qa", "fail", f"on, but a run of {'; '.join(bad)} would only report that"), *out]
     return [Check("config.qa", "ok", f"on; scenarios: {listed} ({cfg.schedule.timezone}); reports on "
@@ -402,7 +406,9 @@ def cmd_runs(args) -> int:
                 print(f"{kind}: the runner is in mode: {cfg.mode}, which starts nothing; run {run.n} waits until it is "
                       "live", file=sys.stderr)
             url, tunnel = report_address(cfg, kind, c.port, run.n)
-            print(f"Run {run.n}{label} queued. The runner starts it once the workspace is free; the report will be at "
+            when = ("once no other test run is under way (it works in its own folder, beside any ticket)"
+                    if kind == "qa" and cfg.qa.workspace is not None else "once the workspace is free")
+            print(f"Run {run.n}{label} queued. The runner starts it {when}; the report will be at "
                   f"{url}{' (through the SSH tunnel)' if tunnel else ''}.")
             return EXIT_OK
         if args.action == "stop":
@@ -508,6 +514,11 @@ def _cleanup_now(cfg: Config, as_json: bool) -> int:
             holding = store.run_holding()
             if holding:
                 print(f"cleanup: the run {holding.id} holds the workspace ({holding.state}); not now",
+                      file=sys.stderr)
+                return EXIT_CHECK_FAILED
+            apart = store.run_apart()
+            if apart:
+                print(f"cleanup: the run {apart.id} is under way in {apart.folder} ({apart.state}); not now",
                       file=sys.stderr)
                 return EXIT_CHECK_FAILED
             engine = Engine(cfg) if bulava_mod.probe(cfg.paths.bulava).installed else None

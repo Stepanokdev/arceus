@@ -1273,7 +1273,7 @@ class ReviewRequest:
 
 
 # A run of a background agent (workspace_run.py: a test run of the platform, an architecture review) in these states
-# has the shared workspace switched to the code it reads.
+# has the shared workspace switched to the code it reads; a run in a folder of its own (AgentRun.folder) has that one.
 RUN_HOLDS = ("preparing", "running", "reviewing", "restoring")
 RUN_UNDER_WAY = ("pending", *RUN_HOLDS, "publishing")
 RUN_FIELDS = ("state", "stop_requested", "snapshot", "result", "outcome", "reason", "started_at", "finished_at",
@@ -1306,6 +1306,17 @@ class AgentRun:
     test_until: str | None = None  # a test run's: when its agent stops testing and writes the report
     progress: str | None = None    # JSON: a test run's plan as the runner last counted it (qa.plan_progress)
     scenario: int = 0              # a test run's scenario (qa_scenarios), 0 for the kinds without them
+
+    @property
+    def folder(self) -> str | None:
+        """The folder of its own the run works in (a test run beside a ticket: config qa.workspace), as its snapshot
+        has kept it since it was prepared; None for a run in the shared workspace."""
+        try:
+            snap = json.loads(self.snapshot or "{}")
+        except ValueError:
+            return None
+        found = snap.get("workspace") if isinstance(snap, dict) else None
+        return found if isinstance(found, str) and found else None
 
 
 @dataclass(frozen=True)
@@ -1516,8 +1527,15 @@ class ReviewStore(TaskStore):
         return bool(cur.rowcount)
 
     def run_holding(self, kind: str | None = None) -> AgentRun | None:
-        """The run (of this kind, or of any) that has the shared workspace now, if any."""
-        found = self.runs(kind, *RUN_HOLDS)
+        """The run (of this kind, or of any) that has the shared workspace now, if any. A run in a folder of its own
+        does not hold it."""
+        found = [r for r in self.runs(kind, *RUN_HOLDS) if not r.folder]
+        return found[0] if found else None
+
+    def run_apart(self, kind: str | None = None) -> AgentRun | None:
+        """The run (of this kind, or of any) at work in a folder of its own now, if any: beside whatever holds the
+        shared workspace."""
+        found = [r for r in self.runs(kind, *RUN_HOLDS) if r.folder]
         return found[0] if found else None
 
     # -- what advisory triage sent to the register (secops.py) --

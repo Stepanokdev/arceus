@@ -8,6 +8,8 @@ Agents leave things behind: stopped containers and their test databases, dev ser
 - the place: `.arceus/media/<KEY>` (after `keep_media`), `.arceus/notes/<KEY>`, `.arceus/replies/<KEY>`, `.arceus/ticket/<KEY>` (after `keep_notes`), the task's branch;
 - the time: one task at a time holds the workspace (`workspace_holds`), so a stopped container that mounts it, a `docker compose run` container of a workspace project or a dev server started in it while task X held it is X's. A compose service's container is never removed by time alone: a dev stack the agent recreated looks the same.
 
+A test run in a folder of its own (`qa.workspace`, [qa.md](qa.md)) never holds the workspace, so what is made in the workspace while it works beside a ticket is the ticket's, as ever. What the run labels as its own (`arceus.task=qa-<n>`) is the run's: it stays while the run is queued or under way, and goes by the same rules as a finished task's once the run is done. Cleanup never looks into the run's folder: the runner removes its checkouts itself when the run is over. While such a run works, cleanup makes no full pass, and `arceus-runner cleanup` refuses as it does while anything works.
+
 | Kind | Removed | Never |
 |---|---|---|
 | containers | stopped ones of a finished task, after `stopped_after`, with their anonymous volumes unless something else uses or protects one; running ones and compose services only with the task's label | foreign projects, `arceus-observability`, `arceus-console`, `protect`, `arceus.keep=true`, a running container or compose service tied by time only, a container holding a protected volume |

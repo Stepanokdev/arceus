@@ -105,9 +105,10 @@ class TaskProgress:
     recent: deque = field(default_factory=lambda: deque(maxlen=RECENT))
 
 
-def tool_target(name: str, args: dict, workspace: Path) -> str:
+def tool_target(name: str, args: dict, workspace: Path | tuple[Path, ...]) -> str:
     """A short, safe word on what a tool call was about: the agent's own description of a command,
-    a file path below the workspace, a search pattern. Never the command itself."""
+    a file path below the workspace (or below any of several folders work goes on in), a search pattern. Never the
+    command itself."""
     if not isinstance(args, dict):
         return ""
     if name == "Bash":
@@ -116,10 +117,12 @@ def tool_target(name: str, args: dict, workspace: Path) -> str:
         value = args.get(key)
         if isinstance(value, str) and value:
             p = Path(value)
-            try:
-                return str(p.resolve().relative_to(workspace))
-            except (ValueError, OSError):
-                return p.name
+            for root in (workspace,) if isinstance(workspace, Path) else workspace:
+                try:
+                    return str(p.resolve().relative_to(root))
+                except (ValueError, OSError):
+                    continue
+            return p.name
     for key in ("description", "skill", "pattern", "query", "url"):
         value = args.get(key)
         if isinstance(value, str) and value:
@@ -131,9 +134,11 @@ class ProgressWatcher:
     def __init__(self, state_dir: Path, workspace: Path, store: ReviewStore, events: EventLog,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC), *,
                  activity_every: timedelta = timedelta(minutes=1), quiet_after: timedelta = timedelta(minutes=20),
-                 projects_dir: Path | None = None):
+                 projects_dir: Path | None = None, others: tuple[Path, ...] = ()):
         self.state_dir = state_dir
         self.workspace = workspace.resolve()
+        # Folders of a run's own beside the workspace (config qa.workspace): paths there are shown below them too.
+        self.roots = (self.workspace, *(o.resolve() for o in others))
         self.store = store
         self.events = events
         self.now = now
@@ -312,7 +317,7 @@ class ProgressWatcher:
                     name = str(part.get("name") or "?")
                     p.tools[name] += 1
                     p.calls += 1
-                    p.last_tool, p.last_target = name, tool_target(name, part.get("input") or {}, self.workspace)
+                    p.last_tool, p.last_target = name, tool_target(name, part.get("input") or {}, self.roots)
                     if p.last_target and not (p.recent and p.recent[-1][2] == p.last_target):
                         p.recent.append((_when(entry.get("timestamp")) or self.now().timestamp(), name,
                                          p.last_target))

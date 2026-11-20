@@ -210,6 +210,16 @@ def stage(run: AgentRun, live_view: dict | None) -> str:
     return words
 
 
+def waits_for(cfg: Config, store: ReviewStore, kind: str) -> str:
+    """What a queued run of `kind` waits for, in words, or '': a run of its kind under way, wherever it works, and,
+    unless test runs have a folder of their own (qa.workspace), whatever holds the shared workspace."""
+    mine = store.run_holding(kind) or store.run_apart(kind)
+    words = f"{status.RUN_WORDS[kind][0]}, run {mine.n}" if mine else ""
+    if kind == "qa" and cfg.qa.workspace is not None:
+        return words
+    return ex.holder_words(store) or words
+
+
 def run_view(cfg: Config, kind: str, n: int, now: float | None = None) -> dict | None:
     """A run's page before its report (and when a finished run has none): where it is, why it waits, the live figures,
     as a task's page shows them (execution.py). None when there is no such run."""
@@ -226,10 +236,10 @@ def run_view(cfg: Config, kind: str, n: int, now: float | None = None) -> dict |
         runner = status.runner_status(m, now)
         running = run.state == "running"
         view = ex.live(m, run.id, now, ex.observed_stale_after(cfg)) if running else None
-        holder = ex.holder_words(store)
+        holder = "" if run.state in RUN_HOLDS else waits_for(cfg, store, kind)
         facts = ex.Facts(state=f"run:{run.state}", turn=(view or {}).get("turn", ""),
                          used_up=ex.used_up(m, cfg.schedule.tz) if running else [],
-                         holder="" if run.state in RUN_HOLDS else holder, mode=m.mode or cfg.mode,
+                         holder=holder, mode=m.mode or cfg.mode,
                          can_take=m.can_take,
                          drain_by=ex.drain_by(store), reason=run.reason or "", stop_asked=bool(run.stop_requested))
         why = ex.reason(facts)

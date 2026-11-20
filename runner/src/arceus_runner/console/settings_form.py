@@ -63,12 +63,13 @@ SETUP_KEYS = ("console", "paths", "bulava.mcp_config", "metrics", "assistant.ena
 # Settings the console shows and never changes: they decide what runs on the machine (a shell command, the engine,
 # the agent's MCP servers, the files the runner reads its environment and tokens from) or where the tokens go (the
 # tracker's and the code host's address, the names of their tokens, Slack's), and how the console itself is
-# reached. Changed in such a way, the console would be a way to run code on the VM or to send its tokens elsewhere;
-# they are set on the server, over SSH.
+# reached, and the folders the runner removes things in (qa.workspace: the test runs' checkouts). Changed in such a
+# way, the console would be a way to run code on the VM, to delete there, or to send its tokens elsewhere; they are set
+# on the server, over SSH.
 LOCKED_KEYS = ("paths", "health.devstack_check", "bulava.mcp_config", "tracker.type", "tracker.url",
                "tracker.token_env", "code_host.type", "code_host.url", "code_host.token_env", "code_host.approver",
                "slack.token_env", "slack.webhook_env", "console", "metrics", "qa.instructions", "qa.reports",
-               "architect.instructions", "architect.reports", "secops.register", "secops.instructions",
+               "qa.workspace", "architect.instructions", "architect.reports", "secops.register", "secops.instructions",
                "secops.reports",
                "assistant.claude_bin", "assistant.codex_bin", "assistant.ticket_engine", "assistant.home", "assistant.secrets",
                "assistant.persona_file", "assistant.knowledge_file", "assistant.port")

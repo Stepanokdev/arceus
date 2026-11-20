@@ -59,18 +59,29 @@ def project_notes(path: Path | None) -> str:
     return text
 
 
-def home_files(where: str, repos: list[Repo], home: Path, notes: str = "") -> dict[str, str]:
+def home_files(where: str, repos: list[Repo], home: Path, notes: str = "", reading: bool = False) -> dict[str, str]:
     """What the agent finds where its session starts: what the folder is, its path, the repositories, and
-    the project's notes when there are any. `where` names the scope: GitLab group `clients/acme`."""
-    lines = [f"# {where}", "",
-             "This folder is not a project. Each folder in it is a separate git repository of the group,",
-             "cloned by the Arceus runner and switched to the task's branch.", "",
-             f"Its absolute path (the workspace): `{home}`", "",
-             "- Work out from the ticket which repositories it needs, and change only those.",
-             "- Commit inside each repository you change, on the branch checked out there. Commit nothing",
-             "  in this folder: it belongs to the runner and is never published.",
-             "- Do not push. The runner pushes the commits Codex accepted and opens one merge request per",
-             "  changed repository.", "", "## Repositories", ""]
+    the project's notes when there are any. `where` names the scope: GitLab group `clients/acme`. `reading`: a folder
+    of a test run's own (workspace_run.py), whose checkouts are there to be read, never changed."""
+    if reading:
+        lines = [f"# {where}", "",
+                 "This folder is not a project. Each folder in it is a checkout of a repository of the group at",
+                 "its default branch, made by the Arceus runner for a test run.", "",
+                 f"Its absolute path: `{home}`", "",
+                 "- Read the code here to explain what you find. Never change it: edit no file, commit nothing,",
+                 "  push nothing, here or in any repository.",
+                 "- The runner removes these checkouts when the run is over; write only where your brief says.",
+                 "", "## Repositories", ""]
+    else:
+        lines = [f"# {where}", "",
+                 "This folder is not a project. Each folder in it is a separate git repository of the group,",
+                 "cloned by the Arceus runner and switched to the task's branch.", "",
+                 f"Its absolute path (the workspace): `{home}`", "",
+                 "- Work out from the ticket which repositories it needs, and change only those.",
+                 "- Commit inside each repository you change, on the branch checked out there. Commit nothing",
+                 "  in this folder: it belongs to the runner and is never published.",
+                 "- Do not push. The runner pushes the commits Codex accepted and opens one merge request per",
+                 "  changed repository.", "", "## Repositories", ""]
     for r in sorted(repos, key=lambda r: r.relative_path):
         lines.append(f"- `{r.relative_path}`" + (f": {' '.join(r.description.split())}" if r.description else ""))
     if notes:

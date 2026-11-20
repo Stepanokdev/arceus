@@ -153,7 +153,8 @@ class Runner:
             # Who else holds the workspace, asked in this order: a code review, then the background runs.
             self.delivery.workspace.holders = [self.reviewer, *self.background]
         self.progress = ProgressWatcher(cfg.paths.bulava_state, cfg.paths.workspace, store, events, now,
-                                        quiet_after=cfg.limits.agent_quiet_after) if self.delivery else None
+                                        quiet_after=cfg.limits.agent_quiet_after,
+                                        others=(cfg.qa.workspace,) if cfg.qa.workspace else ()) if self.delivery else None
         self.ticket_progress = TicketProgress(self.delivery, self.progress, now) if self.progress else None
         self.last_tick: float | None = None  # wall clock of the last finished tick, for the metrics
         self.cleanup = cleanup
@@ -388,7 +389,7 @@ class Runner:
             or (hasattr(self.store, "has_pending_review") and self.store.has_pending_review())))
         try:
             self.cleanup.maybe_run(Situation(holder, waiting, self.health.get("disk_free") in ("warn", "fail"),
-                                             since))
+                                             since, apart=self._apart() is not None))
         except Exception as e:  # cleanup must never stop the work it cleans up after
             self.events.emit("cleanup_failed", error=f"{type(e).__name__}: {e}")
 
@@ -398,6 +399,11 @@ class Runner:
         if self.delivery:
             return self.delivery.workspace.taken()
         return next(iter(self.store.tasks(*ACTIVE_STATES)), None)
+
+    def _apart(self):
+        """A test run at work in a folder of its own (qa.workspace), if any: it holds nothing of the workspace, but
+        work is under way all the same."""
+        return next((held for agent in getattr(self, "background", []) if (held := agent.apart()) is not None), None)
 
     def drain(self) -> dict | None:
         """The console's request to start nothing in the engine (it restarts it once its tasks end), if any."""
@@ -429,7 +435,7 @@ class Runner:
         new work out: not idle, whatever it looks like) or observe."""
         if not self.delivery:
             return "observe"
-        if self._holder() or self.delivery._continues_waiting():
+        if self._holder() or self._apart() or self.delivery._continues_waiting():
             return "working"
         if self.health.get(f"service.{self.tracker.client.name}") != "ok" or not self.can_take():
             return "unknown"

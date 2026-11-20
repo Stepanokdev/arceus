@@ -357,6 +357,38 @@ def test_a_container_is_put_down_to_the_task_that_held_the_workspace_when_it_was
     assert set(d.nets) == {"n1", "n2", "n3", "n4", "n5"}
 
 
+def test_a_test_run_beside_a_ticket_takes_nothing_of_the_tickets_and_its_own_go_when_it_is_over(world):
+    """A test run in a folder of its own (qa.workspace) never holds the workspace: a container mounting the workspace
+    while it works is the ticket's that holds it, as ever. What the run labelled as its own (`arceus.task=qa-<n>`)
+    stays while the run is under way, and goes once it is over."""
+    import json
+    ws = world.ws
+    world.task("ACME-1", "done")
+    world.hold("ACME-1", T0 - timedelta(hours=10))
+    world.hold(None, T0 - timedelta(hours=4))
+    run = world.store.add_run("qa", "command", "ops", scenario=1)
+    world.store.update_run(run.id, state="running", snapshot=json.dumps({"workspace": str(world.tmp / "qa")}),
+                           started_at=iso(T0 - timedelta(hours=8)))
+    d = world.docker
+    d.add("ticket-while-qa-worked", created=T0 - timedelta(hours=7), finished=T0 - timedelta(hours=7),
+          binds=(str(ws / "web"),))
+    d.add("qa-running", status="running", created=T0 - timedelta(hours=6), labels={"arceus.task": run.id})
+    d.add("qa-stopped", created=T0 - timedelta(hours=6), finished=T0 - timedelta(hours=5),
+          labels={"arceus.task": run.id})
+
+    result = world.cleanup.run("full", "manual")
+
+    # The ticket is over: its container goes. The test run works: both of its containers stay.
+    assert world.items(result) == {"ticket-while-qa-worked": ("remove", "done")}
+    assert {"qa-running", "qa-stopped"} <= set(d.cs)
+
+    # The run ends; past `stopped_after`, what it labelled goes, a running container of it too.
+    world.store.update_run(run.id, state="done", finished_at=iso(T0 - timedelta(hours=2)))
+    world.now = T0 + timedelta(hours=1)
+    result = world.cleanup.run("full", "manual")
+    assert world.items(result) == {"qa-stopped": ("remove", "done"), "qa-running": ("stop", "done")}
+
+
 def test_named_volumes_are_caches_and_go_only_with_a_finished_tasks_label(world):
     world.task("ACME-1", "done")
     world.task("ACME-2", "code_review")

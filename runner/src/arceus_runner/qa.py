@@ -497,6 +497,10 @@ class QaAgent(WorkspaceRun):
         super().__init__(delivery, delivery.cfg.qa)
         qa_scenarios.adopt_config(self.store, self.c)
 
+    def _folder(self) -> Path | None:
+        """qa.workspace: test runs work there, beside a ticket, and tickets never wait for them."""
+        return self.c.workspace
+
     # -- the scenarios (qa_scenarios.py), read from runner.db on every pass --------------------------
 
     def _schedules(self) -> list[tuple[int, tuple[str, ...], time]]:
@@ -594,7 +598,7 @@ class QaAgent(WorkspaceRun):
         the run is prepared, and kept in its snapshot, so a repeat is the same message for the engine. The times it
         names are the run's own, fixed then (`deadline`, `test_until`): the runner stops it and the console shows
         it by the same ones."""
-        ws = self.cfg.paths.workspace.resolve()
+        ws = self._home(run)
         out = self.out_dir(run)
         review = self.review_link(run).relative_to(ws).as_posix()
         assert run.deadline and run.test_until and run.started_at
@@ -661,13 +665,20 @@ class QaAgent(WorkspaceRun):
                  "and say in `caption` that it is the raw request and response. Where no picture can honestly show a "
                  "step, name none for it and say why in the finding.", "",
                  "## The code", "",
-                 f"The workspace ({ws}) holds every repository of the platform. To explain a problem, find where it "
-                 "comes from in the code and name the file and line. This is what you suspect, not what you proved: "
-                 "the platform may run a build that differs from the code here. Read the code at these commits:", ""]
+                 (f"The repositories of the platform are checked out in {self.repos_dir(run)}, beside this "
+                  "folder, to be read only: the engine lets you edit nothing there, and they are removed when the run "
+                  "is over. " if run.folder else f"The workspace ({ws}) holds every repository of the platform. ")
+                 + "To explain a problem, find where it comes from in the code and name the file and line (the "
+                 "repository's name as below, and the file's path inside it). This is what you suspect, not what you "
+                 "proved: the platform may run a build that differs from the code here. Read the code at these "
+                 "commits:", ""]
         for r in repos:
             if not r["sha"]:
                 lines.append(f"- `{r['repo']}`: its default branch {r['default']} is not on the code host; there is "
                              "no code to read for it.")
+            elif r["switch"] and run.folder:
+                lines.append(f"- `{r['repo']}`: checked out at `{r['sha']}` ({r['default']}) in "
+                             f"{self._checkout(run, r['repo'])}.")
             elif r["switch"]:
                 lines.append(f"- `{r['repo']}`: checked out at `{r['sha']}` ({r['default']}).")
             else:

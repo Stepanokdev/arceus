@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import subprocess
 import time
 from collections.abc import Callable
@@ -174,6 +175,86 @@ class Git:
         refs/remotes/origin/ so its commits stay until the next fetch of it."""
         self._run(["fetch", "--quiet", "origin", f"+{ref}:refs/remotes/origin/{ref.removeprefix('refs/')}"], repo,
                   network=True)
+
+    # -- a checkout of its own beside the clone (a test run beside a ticket, workspace_run.py) -----------------
+    #
+    # Someone else may be at work in the clone meanwhile (a ticket's agent: its branch, index and files, its own
+    # fetches, its stash). Nothing here touches any of that, and nothing the test run does can: the commit is fetched
+    # into a ref of the run's own, not into origin/<branch> or FETCH_HEAD, and the checkout is a clone of its own in a
+    # folder outside the clone. It borrows the clone's objects read-only (`clone --shared`) instead of copying them,
+    # and keeps its own refs, stash, index and config; its `origin` is removed, so nothing it does reaches the
+    # clone. The run's ref keeps the borrowed commit from the clone's garbage collection.
+
+    def fetch_pinned(self, repo: Path, branch: str, ref: str) -> str | None:
+        """The code host's `branch` fetched into `ref` (refs/arceus/<run>) and its commit, None when the code host
+        has no such branch. Nothing else of the clone changes: no remote-tracking branch, no FETCH_HEAD, no tags, no
+        pruning. The ref keeps the commit while the run reads it, a force-push meanwhile too."""
+        if not self._run(["ls-remote", "--heads", "origin", f"refs/heads/{branch}"], repo, network=True).stdout.strip():
+            return None
+        self._run(["fetch", "--quiet", "--no-tags", "--no-prune", "--no-write-fetch-head", "--no-recurse-submodules",
+                   "--refmap=", "origin", f"+refs/heads/{branch}:{ref}"], repo, network=True)
+        return self.ref_sha(repo, ref)
+
+    def set_ref(self, repo: Path, ref: str, sha: str) -> None:
+        self._run(["update-ref", ref, sha], repo)
+
+    def drop_ref(self, repo: Path, ref: str) -> None:
+        if (repo / ".git").exists():
+            self._run(["update-ref", "-d", ref], repo)
+
+    def _checkout_of(self, clone: Path, dest: Path) -> bool:
+        """Whether `dest` is a checkout `checkout_at` made of `clone`: a repository of its own (never a link), whose
+        objects are borrowed from `clone`'s and nobody else's."""
+        if dest.is_symlink() or not (dest / ".git").is_dir() or (dest / ".git").is_symlink():
+            return False
+        try:
+            borrowed = (dest / ".git" / "objects" / "info" / "alternates").read_text().split()
+        except OSError:
+            return False
+        return [os.path.realpath(p) for p in borrowed] == [os.path.realpath(clone / ".git" / "objects")]
+
+    def checkout_at(self, clone: Path, dest: Path, sha: str) -> bool:
+        """`dest` a checkout of `clone` at the commit `sha`, detached, in a repository of its own that borrows
+        `clone`'s objects and has no remote. One already there, of this clone, at that commit with nothing changed
+        in it, is kept; anything else at `dest` goes and the checkout is made again. No hook of the repository runs.
+        True when it was made."""
+        if self._checkout_of(clone, dest):
+            res = self._run(["rev-parse", "HEAD"], dest, check=False)
+            clean = self._run(["status", "--porcelain", "--untracked-files=normal"], dest, check=False,
+                              read_only=True)
+            if res.returncode == 0 and res.stdout.strip() == sha and self.current_branch(dest) is None \
+                    and clean.returncode == 0 and not clean.stdout.strip():
+                read_only(dest)
+                return False
+        self.drop_checkout(clone, dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        self._run(["clone", "--quiet", "--shared", "--no-checkout", "--no-hardlinks", "--template=",
+                   str(clone), str(dest)], None)
+        self._run(["remote", "remove", "origin"], dest)
+        self._run(["-c", "core.hooksPath=/dev/null", "checkout", "--quiet", "--detach", sha], dest, network=True)
+        read_only(dest)
+        return True
+
+    def drop_checkout(self, clone: Path, dest: Path) -> list[str]:
+        """Whatever is at `dest` gone. Safe to repeat, also after a crash halfway. What had been changed or added in
+        a checkout of `clone` there, as `dirty_files` names it. `dest` must be in a folder the runner owns
+        (workspace_run.claim_folder): anything there is its own. A linked worktree an earlier version made there is
+        also forgotten by the clone."""
+        left: list[str] = []
+        if self._checkout_of(clone, dest):
+            try:
+                left = self.dirty_files(dest)
+            except GitError:
+                pass
+        linked = (dest / ".git").is_file() and not dest.is_symlink()
+        if dest.is_symlink():
+            dest.unlink()
+        elif dest.exists():
+            writable(dest)
+            shutil.rmtree(dest)
+        if linked and (clone / ".git").exists():
+            self._run(["worktree", "prune"], clone)  # only registrations whose folder is gone
+        return left
 
     def commit_all(self, repo: Path, message: str) -> str:
         """Commit everything in the tree (tracked, untracked, not ignored) as the repository's author."""
@@ -397,6 +478,29 @@ class Git:
     def abort(self, repo: Path, operation: str) -> None:
         """Back to where the operation started: the commits made before it are kept, the half-done part goes."""
         self._run([operation, "--abort"], repo)
+
+
+def read_only(top: Path) -> None:
+    """Nothing under `top` writable by anyone, its git metadata included: a shell command that writes a file there,
+    or git that writes its index, refs or stash there, fails. Links are not followed."""
+    for d, dirs, files in os.walk(top, followlinks=False):
+        for name in files:
+            p = os.path.join(d, name)
+            if not os.path.islink(p):
+                os.chmod(p, os.lstat(p).st_mode & ~0o222)
+        os.chmod(d, os.lstat(d).st_mode & ~0o222)
+
+
+def writable(top: Path) -> None:
+    """The owner may write under `top` again (read_only undone), so that the runner can remove it."""
+    if top.is_symlink() or not top.is_dir():
+        return
+    os.chmod(top, os.lstat(top).st_mode | 0o700)
+    for d, dirs, files in os.walk(top, followlinks=False):
+        for name in dirs:
+            p = os.path.join(d, name)
+            if not os.path.islink(p):
+                os.chmod(p, os.lstat(p).st_mode | 0o700)
 
 
 def restore_workspace(git: Git, ws: Path, branch: str, repos: list[dict], home_prev: str | None, *,

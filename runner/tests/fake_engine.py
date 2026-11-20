@@ -5,8 +5,10 @@ state in $SUPERVISOR_STATE_DIR/fake-engine.json and logs every call with the
 environment it saw, so tests can check what the runner handed to the engine.
 """
 
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -28,6 +30,47 @@ def save(s: dict) -> None:
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def session_of(folder: str) -> str:
+    """The engine's tmux session for a folder (supervisor-lib.sh: session_name of slug_for)."""
+    real = os.path.realpath(folder) if os.path.isdir(folder) else folder
+    base = re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9]", "-", os.path.basename(real))).strip("-") or "proj"
+    return f"night-{base}-{hashlib.sha1(real.encode()).hexdigest()[:12]}"
+
+
+def open_session(s: dict, folder: str) -> None:
+    sessions = s.setdefault("sessions", [])
+    if session_of(folder) not in sessions:
+        sessions.append(session_of(folder))
+
+
+def tmux(s: dict, argv: list[str]) -> int:
+    """Installed as tmux too: the engine's tmux server, as far as the runner asks it. Sessions are opened by a
+    dispatch or a follow-up and stay, as the engine leaves them, until killed. `tmux_fails` makes it answer as a
+    tmux that cannot be asked."""
+    if argv[:1] == ["-L"]:
+        argv = argv[2:]
+    sessions = s.setdefault("sessions", [])
+    if s.get("tmux_fails"):
+        print("lost server", file=sys.stderr)
+        return 1
+    name = argv[argv.index("-t") + 1].lstrip("=") if "-t" in argv else ""
+    if argv[:1] == ["list-sessions"]:
+        if not sessions:
+            print("no server running on /tmp/tmux-fake/bulava", file=sys.stderr)
+            return 1
+        print("\n".join(sessions))
+        return 0
+    if argv[:1] == ["has-session"]:
+        return 0 if name in sessions else 1
+    if argv[:1] == ["kill-session"]:
+        if name not in sessions:
+            return 1
+        if name not in s.get("unkillable", []):  # a session a test keeps alive whatever is asked
+            sessions.remove(name)
+        return 0
+    return 2
 
 
 def flags(argv: list[str]) -> tuple[dict, list[str]]:
@@ -55,6 +98,10 @@ def main() -> int:
     s["calls"].append({"cmd": cmd, "argv": argv, "env": {k: v for k, v in os.environ.items()
                                                        if k.startswith(("SUPERVISOR_", "CLAUDE_", "NIGHT_SHIFT", "GIT", "YOUTRACK",
                                                                         "SLACK"))}})
+    if cmd == "tmux":
+        rc = tmux(s, argv)
+        save(s)
+        return rc
     sub = f"{cmd} {argv[0]}" if argv else cmd
     forced = s["next_rc"].pop(sub, None)
     if forced is None:
@@ -75,6 +122,13 @@ def main() -> int:
             save(s)
             print(f"❌ задача {tid} уже є", file=sys.stderr)
             return 2
+        # engine/SERVER.md: `busy` (6) while another task in this folder is running. Off unless a test asks for it:
+        # the runner's own tests often leave a task the runner is done with as the engine last showed it.
+        if s.get("busy_by_folder") and any(x["project"] == repo and x["state"] == "running" and x["attempt_live"]
+                                           for x in s["tasks"].values()):
+            save(s)
+            print("TIER=busy")
+            return 6
         subprocess.run(["git", "-C", repo, "checkout", "-q", "-B", f["branch"], f["base"]], check=True)
         base = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         # Like the engine: every repository of the task with its own base, the project first.
@@ -92,6 +146,8 @@ def main() -> int:
             "attempts": [{"n": 1, "kind": "initial", "started_at": now(), "ended_at": None}],
             "messages": {f.get("message-id"): text},
         }
+        open_session(s, repo)
+        s["tasks"][tid]["session"] = session_of(repo)
         save(s)
         return emit("dispatched", {"task_id": tid, "dispatch_id": "d-1", "attempt": 1, "message_id": f.get("message-id")})
 
@@ -118,6 +174,7 @@ def main() -> int:
         t["messages"][mid] = text
         t["attempts"].append({"n": len(t["attempts"]) + 1, "kind": "continue", "started_at": now(), "ended_at": None})
         t.update(state="running", attempt_live=True, question=None)
+        open_session(s, t["project"])
         save(s)
         return emit("dispatched", {"task_id": tid, "attempt": len(t["attempts"])})
 
@@ -132,13 +189,24 @@ def main() -> int:
             if not t:
                 print(f"❌ задачі {argv[3]} немає", file=sys.stderr)
                 return 1
-            print(json.dumps({k: v for k, v in t.items() if k != "messages"}))
+            shown = {k: v for k, v in t.items() if k != "messages"}
+            # Like the engine (tasks.sh task_busy): an attempt is live only while its folder's session is there.
+            named = t.get("session") or (session_of(t["project"]) if "project" in t else None)  # kept with the attempt
+            if shown.get("attempt_live") is True and named and named not in s.get("sessions", []):
+                shown["attempt_live"] = False
+            print(json.dumps(shown))
             return 0
         if argv[:1] == ["doctor"]:
             checks = s.get("doctor") or [{"name": "auth.claude", "status": "ok", "detail": "signed in"}]
             save(s)
             print(json.dumps({"ok": all(c["status"] != "fail" for c in checks), "schema": 1, "checks": checks}))
             return 1 if any(c["status"] == "fail" for c in checks) else 0
+        if argv[:1] == ["stop"] and len(argv) > 1:
+            # Like the engine: the folder's run is no longer live in its record (its tmux session is another matter,
+            # engine.stop_worker).
+            for t in s["tasks"].values():
+                if t.get("project") == argv[1]:
+                    t["attempt_live"] = False
         save(s)
         return 0  # trust, mcp-decide, stop
     return 2

@@ -17,9 +17,19 @@ and the architecture reviews (architect.py) are this with their own brief, repor
   fetched; a repository with uncommitted work is left as it is and the agent is told which commit to read there
   with `git show`. The repositories are not writable for it. Then the runner stashes what the run left, checks
   every repository out where it was and frees the workspace. A crash at any point resumes from the stored state.
-- **What comes back.** The agent writes its findings into `.arceus/<kind>/<kind>-<n>/` in the workspace. The kind
-  reads them defensively, and the run's report goes into its folder under the kind's `reports`. The folder in the
-  workspace is removed once the report is written.
+- **Or a folder of its own.** A kind given one (`_folder`: qa.workspace) holds nothing of the shared workspace and
+  works beside a ticket, one run of the kind at a time. The folder holds `home`, the engine's project the agent runs
+  in, and `repos` beside it. Each repository's default branch is fetched into a ref of the run's own
+  (`refs/arceus/<kind>-<n>`) and checked out in `repos`, detached, as a repository of its own that borrows the
+  clone's objects (gitops.checkout_at); nothing of the clone a ticket works in moves, and nothing the run's agent does
+  in its checkout reaches it. The checkouts are outside the engine's project and not writable for the agent. The folder
+  is kept in the run's snapshot (`workspace`, AgentRun.folder) before anything changes in git, so every later step of
+  that run (a resume, a stop, the review, putting back) works there, whatever config.yaml says by then. Nothing is put
+  back while the run's worker may still run: its tmux session is ended and checked gone first (`_worker_gone`,
+  `_stop_worker`). Putting back removes the checkouts and the refs; the folder itself stays, trusted once.
+- **What comes back.** The agent writes its findings into `.arceus/<kind>/<kind>-<n>/` in the folder the run works
+  in. The kind reads them defensively, and the run's report goes into its folder under the kind's `reports`. The
+  folder in the workspace is removed once the report is written.
 """
 
 from __future__ import annotations
@@ -123,6 +133,42 @@ def link_code(refs: list[dict], snap: dict, host) -> None:
                                 r["sha"], c["file"], c["line"])
 
 
+HOME_DIR = "home"    # in a folder of a kind's own: the engine's project, where the agent writes its evidence
+REPOS_DIR = "repos"  # beside it: the checkouts it reads, outside that project
+FOLDER_MARK = ".arceus-folder"  # in a folder of a kind's own (qa.workspace): the runner's, everything in it too
+FOLDER_MARK_TEXT = ("The Arceus runner's folder for test runs (config qa.workspace). The runner makes and removes "
+                    "checkouts here; keep nothing of your own in it.\n")
+
+
+def folder_problem(root: Path) -> str:
+    """Why `root` cannot be a folder of the runner's own, or "": one that does not exist yet, or an empty one, can be
+    made the runner's (claim_folder); one with the mark is the runner's already. Anything else (a folder with files
+    and no mark, a link, a file) is someone else's: the runner removes checkouts in its folder, and never in theirs.
+    Looks only, changes nothing."""
+    if root.is_symlink():
+        return f"qa.workspace {root} is a link; give the folder itself"
+    if not root.exists():
+        return ""
+    if not root.is_dir():
+        return f"qa.workspace {root} is not a folder"
+    mark = root / FOLDER_MARK
+    if (mark.is_file() and not mark.is_symlink()) or not any(root.iterdir()):
+        return ""
+    return (f"qa.workspace {root} holds files and is not the runner's (no {FOLDER_MARK} in it): give an empty "
+            "folder, or one that does not exist yet")
+
+
+def claim_folder(root: Path) -> str:
+    """`root` made the runner's (folder_problem says when it cannot be), or why not."""
+    why = folder_problem(root)
+    if why:
+        return why
+    if not (root / FOLDER_MARK).is_file():
+        root.mkdir(parents=True, exist_ok=True)
+        write_atomic(root / FOLDER_MARK, FOLDER_MARK_TEXT)
+    return ""
+
+
 def write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(text, encoding="utf-8")
@@ -187,16 +233,85 @@ class WorkspaceRun:
                     branch=self._branch(run), base_branch=HOME_BRANCH, question_id=None, question_at_ms=None,
                     reason=None, mr_urls="[]", attempt_started=run.started_at, extra_repos="[]")
 
+    def apart(self) -> Task | None:
+        """The run at work in a folder of its own now, as `holding` gives a run: it holds nothing of the shared
+        workspace, but the loop and cleanup still count it as work under way (no full cleanup pass meanwhile)."""
+        run = self.store.run_apart(self.KIND)
+        if run is None:
+            return None
+        return Task(task_id=run.id, issue_db_id="", state="dispatched", summary=f"{self.TITLE}, run {run.n}",
+                    tag_author=run.requested_by, repo="", repo_path=run.folder or "", branch=self._branch(run),
+                    base_branch=HOME_BRANCH, question_id=None, question_at_ms=None, reason=None, mr_urls="[]",
+                    attempt_started=run.started_at, extra_repos="[]")
+
     def waiting(self) -> bool:
-        """A queued run waits for the workspace: it goes before new tickets."""
+        """A queued run waits for the workspace: it goes before new tickets. Not one that will work in a folder of its
+        own: tickets do not wait for it."""
+        if self._folder() is not None:
+            return False
         return any(not r.stop_requested for r in self.store.runs(self.KIND, "pending"))
+
+    def _folder(self) -> Path | None:
+        """The folder of the kind's own its runs are prepared in from now on, or None: the shared workspace."""
+        return None
+
+    def root(self, run: AgentRun) -> Path:
+        """The folder the engine runs the agent in: the shared workspace, or, for a run in a folder of its own, that
+        folder's `home` (HOME_DIR), its evidence and report links in it. Its checkouts lie beside it, in `repos`
+        (REPOS_DIR): outside the engine's project, where the engine lets the agent read and never edit."""
+        return Path(run.folder) / HOME_DIR if run.folder else self.cfg.paths.workspace
+
+    def _owned(self, run: AgentRun) -> bool:
+        """Whether the folder a run works in is the runner's still: the very folder (no link in its place) with the
+        runner's mark in it. Checked again before anything in it is written or removed."""
+        root = Path(run.folder) if run.folder else None
+        if root is None:
+            return False
+        mark = root / FOLDER_MARK
+        if not (root.is_dir() and not root.is_symlink() and mark.is_file() and not mark.is_symlink()):
+            return False
+        # Its `home` and `repos` are folders of its own too: a link in either's place would send what is written
+        # or removed there, or the engine's stop of the folder, somewhere else (a ticket's workspace).
+        home = root / HOME_DIR
+        chain = (home, root / REPOS_DIR, home / ".arceus", home / ".arceus" / self.KIND, self.out_dir(run),
+                 home / "artifacts", home / "artifacts" / run.id)
+        return all(not p.is_symlink() and (p.is_dir() or not p.exists()) for p in chain)
+
+    def _pinned(self, run: AgentRun) -> str:
+        """The ref a run in a folder of its own keeps each repository's commit in, in the clone."""
+        return f"refs/arceus/{run.id}"
+
+    def _home(self, run: AgentRun) -> Path:
+        """`root` as a path to write under: for a run in a folder of its own its home as kept (the folder was resolved
+        when the run was prepared), never followed through a link put there since; `_owned` says whether every
+        folder on the way is still the runner's."""
+        return Path(os.path.normpath(Path(run.folder) / HOME_DIR)) if run.folder else self.cfg.paths.workspace.resolve()
+
+    def repos_dir(self, run: AgentRun) -> Path:
+        """Where a run in a folder of its own has its checkouts: beside the engine's project (`root`)."""
+        return Path(os.path.normpath(Path(run.folder) / REPOS_DIR)) if run.folder else self.cfg.paths.workspace
+
+    def _checkout(self, run: AgentRun, repo: str) -> Path:
+        """Where a run in a folder of its own has `repo` checked out: below its `repos`, by the path as it is written,
+        never through a link. A link anywhere from the run's folder down (its `repos` too, or a group's folder) is an
+        OSError: whatever it leads to is not the runner's to write in or remove."""
+        top = Path(os.path.normpath(run.folder)) if run.folder else self.cfg.paths.workspace
+        base = top / REPOS_DIR if run.folder else top
+        dest = Path(os.path.normpath(base / repo))
+        if base not in dest.parents:
+            raise OSError(f"{repo} is not a folder below {base}")
+        for p in [base, *reversed([q for q in dest.parents if base in q.parents]), dest]:
+            if p.is_symlink():
+                raise OSError(f"{p} is a link: nothing of {repo} is written or removed through it")
+        return dest
 
     def _branch(self, run: AgentRun) -> str:
         return f"arceus-{self.KIND}/{run.n}"
 
     def out_dir(self, run: AgentRun) -> Path:
-        """Where the agent writes what it found: the workspace's own folder, outside every repository."""
-        return self.cfg.paths.workspace.resolve() / ".arceus" / self.KIND / run.id
+        """Where the agent writes what it found: the runner's own folder where the run works, outside every
+        repository."""
+        return self._home(run) / ".arceus" / self.KIND / run.id
 
     def run_dir(self, run: AgentRun) -> Path:
         return self.c.reports / str(run.n)
@@ -300,7 +415,8 @@ class WorkspaceRun:
     # -- starting one (the local poll) ------------------------------------------------------------
 
     def start(self, can_take: bool) -> None:
-        """The oldest queued run, when the workspace is free: prepared and dispatched."""
+        """The oldest queued run, when the workspace is free: prepared and dispatched. One that will work in a folder
+        of its own waits only for a run of its kind under way."""
         for run in self.store.runs(self.KIND, "pending"):
             if run.stop_requested or not self.enabled:
                 self._close(run, "stopped", self.stopped if run.stop_requested
@@ -308,9 +424,11 @@ class WorkspaceRun:
                 continue
             if not can_take:
                 return
-            holder = self.d.workspace.taken()
-            if holder is not None:
-                self._note_waiting(run, "workspace_taken", holder=holder.task_id)
+            mine = self.holding() or self.apart()  # one run of a kind at a time, wherever it works
+            held = None if self._folder() is not None else self.d.workspace.taken()
+            if held is not None or mine is not None:
+                self._note_waiting(run, "workspace_taken" if held is not None else "run_under_way",
+                                   holder=(held or mine).task_id)
                 return
             try:
                 self._prepare(run)
@@ -326,21 +444,41 @@ class WorkspaceRun:
         ws = self.cfg.paths.workspace
         branch = self._branch(run)
         group = self.d.workspace.group()
-        repos = []
-        for repo in group:
-            path = ws / repo.relative_path
-            self.d.workspace.ensure_repo(repo, path)
-            default = repo.default_branch or "main"
-            sha = self.git.ref_sha(path, f"origin/{default}")
-            current = self.git.current_branch(path)
-            # A repository with uncommitted work (a ticket waiting on people) is not switched: that work stays where
-            # it is, and the agent reads the default branch there with git show.
-            switch = bool(sha) and (current == branch or self.git.is_clean(path))
-            repos.append({"repo": repo.relative_path, "default": default, "sha": sha or "", "switch": switch,
-                          "http_url": repo.http_url, "prev": current if current != branch else None,
-                          "prev_head": self.git.head(path) if switch else ""})
+        # A run that began to be prepared in a folder of its own keeps it, whatever config.yaml says by now.
+        own = Path(run.folder) if run.folder else self._folder()
+        if own is not None:
+            why = claim_folder(own)  # the path as given: a link there is refused, never followed
+            if why:
+                self._close(run, "unfinished", why)
+                return
+            own = own.resolve()
+            linked = [p for p in (own / HOME_DIR, own / REPOS_DIR) if p.is_symlink() or (p.exists() and not p.is_dir())]
+            if linked:
+                self._close(run, "unfinished", f"{linked[0]} is a link or not a folder: the runner writes and removes "
+                                               f"only in folders of its own under {own}")
+                return
+            if not run.folder:
+                # Kept before anything changes in git: whatever this run does in a clone from here on, a later pass
+                # (after a crash, a stop) finds it named here.
+                run = self.store.update_run(run.id, snapshot=json.dumps({"workspace": str(own), "pinned": {}}))
+            repos = self._pin(run, group)
+        else:
+            repos = []
+            for repo in group:
+                path = ws / repo.relative_path
+                self.d.workspace.ensure_repo(repo, path)
+                default = repo.default_branch or "main"
+                sha = self.git.ref_sha(path, f"origin/{default}")
+                current = self.git.current_branch(path)
+                # A repository with uncommitted work (a ticket waiting on people) is not switched: that work stays
+                # where it is, and the agent reads the default branch there with git show.
+                switch = bool(sha) and (current == branch or self.git.is_clean(path))
+                repos.append({"repo": repo.relative_path, "default": default, "sha": sha or "", "switch": switch,
+                              "http_url": repo.http_url, "prev": current if current != branch else None,
+                              "prev_head": self.git.head(path) if switch else ""})
         home = ws
-        if (home / ".git").exists() and self.git.current_branch(home) != branch and not self.git.is_clean(home):
+        if own is None and (home / ".git").exists() and self.git.current_branch(home) != branch \
+                and not self.git.is_clean(home):
             self._note_waiting(run, "uncommitted_changes", repos=["."])
             return
         extra, nothing = self._scope(run, repos)
@@ -357,41 +495,126 @@ class WorkspaceRun:
         until = self._test_until(now)
         run = replace(run, started_at=now.isoformat(), deadline=(now + self.c.timeout).isoformat(),
                       test_until=until.isoformat() if until else None)
+        # Every ref this run made, also of a repository that left the group between two tries: put back by them all.
+        pinned = json.loads(self.store.run(run.id).snapshot or "{}").get("pinned") if own is not None else None
         snapshot = {"branch": branch, "repos": repos, **extra, "text": self._compose(run, text, repos, extra),
-                    "home_prev": self.git.current_branch(home) if (home / ".git").exists() else None,
+                    **({"workspace": str(own), "pinned": pinned or {}} if own is not None else {}),
+                    "home_prev": self.git.current_branch(home) if own is None and (home / ".git").exists() else None,
                     "instructions": {"path": str(source), "bytes": len(text.encode()),
                                      "sha256": hashlib.sha256(text.encode()).hexdigest()}}
         run = self.store.update_run(run.id, state="preparing", snapshot=json.dumps(snapshot),
                                     started_at=run.started_at, deadline=run.deadline, test_until=run.test_until)
         self._waiting.pop(run.id, None)
         self.emit("preparing", task_id=run.id, run=run.n, repos=len(repos),
-                  not_switched=[r["repo"] for r in repos if not r["switch"]] or None)
+                  not_switched=[r["repo"] for r in repos if not r["switch"]] or None,
+                  **({"folder": str(own)} if own is not None else {}))
         self._dispatch(run)
+
+    def _pin(self, run: AgentRun, group: list) -> list[dict]:
+        """For a run in a folder of its own: each repository's default branch fetched into the run's ref in the clone,
+        as the snapshot keeps it. The clone may be a ticket's at work: only that ref changes there; a repository not
+        cloned yet is cloned as a ticket would clone it. Each ref is named in the run's snapshot (`pinned`) before it
+        is made and its commit after, so a pass after a crash goes on with the commits already chosen, and a run
+        stopped before it starts takes away every ref it made (`_unpin`)."""
+        ws = self.cfg.paths.workspace
+        ref = self._pinned(run)
+        snap = json.loads(run.snapshot)
+        pinned: dict[str, str | None] = dict(snap.get("pinned") or {})
+        repos: list[dict] = []
+        for repo in group:
+            name = repo.relative_path
+            path = ws / name
+            default = repo.default_branch or "main"
+            if not (path / ".git").exists():
+                self.d.workspace.ensure_repo(repo, path)
+            # Whatever is left at the checkout's place (a run before that never got put back) goes first.
+            self.git.drop_checkout(path, self._checkout(run, name))
+            sha = pinned.get(name)
+            if sha and self.git.ref_sha(path, ref) != sha:
+                if self.git.has_commit(path, sha):
+                    self.git.set_ref(path, ref, sha)  # the commit chosen before the crash, not today's
+                else:
+                    self.emit("pin_lost", task_id=run.id, run=run.n, repo=name, sha=sha)
+                    sha = None
+            if sha is None:
+                pinned[name] = None  # named before the fetch makes it
+                run = self.store.update_run(run.id, snapshot=json.dumps({**snap, "pinned": pinned}))
+                sha = self.git.fetch_pinned(path, default, ref) or ""
+                pinned[name] = sha
+                run = self.store.update_run(run.id, snapshot=json.dumps({**snap, "pinned": pinned}))
+            repos.append({"repo": name, "default": default, "sha": sha, "switch": bool(sha),
+                          "http_url": repo.http_url, "prev": None, "prev_head": ""})
+        return repos
+
+    def _unpin(self, run: AgentRun) -> bool:
+        """The refs a run that never started made in the clones, gone. False when git refused: the next pass tries
+        again, and the run is not closed before."""
+        pinned = json.loads(run.snapshot or "{}").get("pinned") or {}
+        try:
+            for name in pinned:
+                self.git.drop_ref(self.cfg.paths.workspace / name, self._pinned(run))
+        except (GitError, OSError) as e:
+            self.emit("step_failed", task_id=run.id, run=run.n, step="unpin", reason=str(e))
+            return False
+        return True
 
     def _dispatch(self, run: AgentRun) -> None:
         """Switch the workspace to the code at the default branches and hand the run to the engine. Safe to repeat."""
         snap = json.loads(run.snapshot)
         ws = self.cfg.paths.workspace
+        root = self.root(run)
         branch = snap["branch"]
+        if self._overdue(run):
+            # Its time ran out while the engine was busy (or the runner was down): it never starts late.
+            hours = self._given(run).total_seconds() / 3600
+            self._settled(run, None, f"the run could not start in its {hours:g} h: the engine stayed busy")
+            return
         try:
             notes = project_notes(self.cfg.paths.project_notes)
         except ProjectNotesError as e:
             self._settled(run, None, f"the project's notes for the agent cannot be given to it ({e})")
             return
-        self.d.workspace.prepare_home(self.d.workspace.group(), notes)
-        for r in snap["repos"]:
-            if r["switch"]:
-                self.git.start_branch(ws / r["repo"], branch, r["sha"])
+        if run.folder:
+            if not self._owned(run):
+                self._settled(run, None, f"{run.folder} is no longer the runner's folder (its {FOLDER_MARK} is gone, or "
+                                         f"a link stands in its place or in its {HOME_DIR} or {REPOS_DIR})")
+                return
+            self.d.workspace.prepare_home(self.d.workspace.group(), notes, home=root, reading=True)
+            where = {}
+            for r in snap["repos"]:
+                where[r["repo"]] = dest = self._checkout(run, r["repo"])
+                if r["switch"]:
+                    self.git.checkout_at(ws / r["repo"], dest, r["sha"])
+                    self.d.workspace.prepare_checkout(root, dest)
+            listed = [where[r["repo"]] for r in snap["repos"] if r["switch"]]
+        else:
+            self.d.workspace.prepare_home(self.d.workspace.group(), notes)
+            for r in snap["repos"]:
+                if r["switch"]:
+                    self.git.start_branch(ws / r["repo"], branch, r["sha"])
+            listed = [ws / r["repo"] for r in snap["repos"]]
         extra = self._extra_dirs(run)
         extra.parent.mkdir(parents=True, exist_ok=True)
-        extra.write_text("".join(f"{ws / r['repo']}\n" for r in snap["repos"]))
+        extra.write_text("".join(f"{p}\n" for p in listed))
         # Read the code there, never edit it: no writable-directories.txt beside the list.
         (extra.parent / "writable-directories.txt").unlink(missing_ok=True)
         self.out_dir(run).mkdir(parents=True, exist_ok=True)
+        report_review = self._report_review(run)
+        if run.folder:
+            # The worker's session as the engine will name it, kept before the engine is asked: a crash between its
+            # answer and the runner's record of it leaves a run that says which worker to wait for.
+            snap = json.loads(self.store.run(run.id).snapshot or "{}")
+            if not snap.get("session"):
+                snap["session"] = self.d.engine.folder_session(Path(root))
+                run = self.store.update_run(run.id, snapshot=json.dumps(snap))
+        if self._overdue(run):  # again: getting the checkouts ready can take long, and a run never starts late
+            hours = self._given(run).total_seconds() / 3600
+            self._settled(run, None, f"the run could not start in its {hours:g} h: the engine stayed busy")
+            return
         reply = self.d.engine.dispatch(task_id=run.id, message_id=f"{self.KIND}-{run.id}", author=run.requested_by,
-                                       source="other", branch=branch, base=HOME_BRANCH, repo=Path(ws),
+                                       source="other", branch=branch, base=HOME_BRANCH, repo=Path(root),
                                        text=snap["text"], clearance=trusted(snap["text"]), extra_dirs=extra,
-                                       report_review=self._report_review(run))
+                                       report_review=report_review)
         if reply.accepted:
             self.store.update_run(run.id, state="running")
             self.emit("dispatched", task_id=run.id, run=run.n, source=run.source, by=run.requested_by,
@@ -417,7 +640,7 @@ class WorkspaceRun:
         names in its summary, or else the newest one, in `artifacts/` of the folder the session starts in, and only
         as html, md or txt (engine/bin/pipeline-tool.py find_report, report_text); the agent's report is JSON in its
         own folder. A link there, to that file, makes every round read the part as it is then."""
-        return self.cfg.paths.workspace.resolve() / "artifacts" / run.id / (Path(self._part_file(k)).stem + ".txt")
+        return self._home(run) / "artifacts" / run.id / (Path(self._part_file(k)).stem + ".txt")
 
     def _part_file(self, k: int) -> str:
         """The agent's file of part k of its report. One part unless the kind says otherwise."""
@@ -431,7 +654,7 @@ class WorkspaceRun:
         """Make review_link of part k, relative so that it holds wherever the workspace is. Safe to repeat. Never
         through an `artifacts` that is itself a link: whatever it points at is not the workspace's to write in."""
         link = self.review_link(run, k)
-        ws = self.cfg.paths.workspace.resolve()
+        ws = self._home(run)
         art = ws / "artifacts"
         if art.is_symlink() or (art / run.id).is_symlink():
             self.emit("review_link_skipped", task_id=run.id, run=run.n, reason=f"{art} is a link")
@@ -466,10 +689,17 @@ class WorkspaceRun:
         for run in self.store.runs(self.KIND, "preparing", "running", "reviewing", "restoring", "publishing"):
             try:
                 if run.state == "preparing":
-                    if run.stop_requested:
-                        self._settled(run, None, self.stopped)
-                    elif self.d.engine.show(run.id) is not None:  # dispatched before a crash, never recorded
+                    # The engine first: a dispatch it took before a crash was never recorded, and a stop then is a
+                    # stop of a live worker, followed as one (`_follow`), never a cleanup under it. The engine says
+                    # the same of a task it has no record of and of one whose record it cannot read: then the
+                    # worker's session, kept before the dispatch, says whether one runs.
+                    snap = json.loads(run.snapshot or "{}")
+                    if self.d.engine.show(run.id) is not None:
                         self.store.update_run(run.id, state="running")
+                    elif snap.get("session") and self.d.engine.session_alive(snap["session"]):
+                        self.store.update_run(run.id, state="running")
+                    elif run.stop_requested:
+                        self._settled(run, None, self.stopped)
                     else:
                         self._dispatch(run)
                 elif run.state == "running":
@@ -485,35 +715,116 @@ class WorkspaceRun:
 
     def _follow(self, run: AgentRun) -> None:
         show = self.d.engine.show(run.id)
+        stopping = json.loads(run.snapshot or "{}").get("stopping")
         if show is None:
+            # The engine has no readable record of the run (gone, or corrupt: it says the same for both). Its worker
+            # is found by its session all the same. While it runs it is left to work: it is ended only when the run
+            # is stopped or out of time, and nothing is put back before it is gone.
+            why = stopping["why"] if stopping else self.stopped if run.stop_requested else self._timed_out(run)
+            if why:
+                if self._stop_worker(run, why):
+                    self._settled(run, None, why)
+                return
+            if run.folder and self.d.engine.session_alive(self._session(run)):
+                self._note_waiting(run, "record_unreadable_worker_alive", session=self._session(run))
+                return
             self._settled(run, None, "the execution engine lost track of the run")
+            return
+        if run.folder and not stopping and not self._owned(run):
+            # Its folder, or a folder on the way to its report, was replaced (a link put in its place): nothing more
+            # is written there or handed to the engine by that path. Its worker is ended by its session's name.
+            why = f"{run.folder} is no longer the runner's folder: the run was stopped"
+            if self._stop_worker(run, why):
+                self._settled(run, show, why)
             return
         run = self._note_progress(run)
         if self._review_pending(run):
             return
         state = show.get("state")
-        if state in ("queued", "running"):
-            if run.stop_requested:
-                self.d.engine.stop(Path(self.cfg.paths.workspace))
-                self._settled(run, show, self.stopped)
-                return
+        live = state in ("queued", "running")
+        # A stop, once begun, is seen through whatever the engine's record says by then: the engine may end the
+        # attempt in its record while the worker's session goes on (Engine.stop_worker), and nothing is put back
+        # under a worker that still runs.
+        why = stopping["why"] if stopping else None
+        if why is None and run.stop_requested:  # also when the record already says the attempt ended
+            why = self.stopped
+        if why is None and live:
+            why = self._timed_out(run)
+        if why is not None:
+            if self._stop_worker(run, why):
+                self._settled(run, show, why)
+            return
+        if live:
             if state == "queued" or show.get("attempt_live"):
-                if self._overdue(run):
-                    self.d.engine.stop(Path(self.cfg.paths.workspace))
-                    hours = self._given(run).total_seconds() / 3600
-                    self._settled(run, show, f"the run did not finish in {hours:g} h and was stopped")
                 return
             attempt = len(show.get("attempts") or [])
             text = self._resume_text(run)
             reply = self.d.engine.send(task_id=run.id, message_id=f"resume-{run.id}-{attempt}", source="other",
-                                       author=run.requested_by, repo=Path(self.cfg.paths.workspace), text=text,
+                                       author=run.requested_by, repo=Path(self.root(run)), text=text,
                                        clearance=trusted(text), extra_dirs=self._extra_dirs(run))
-            if not reply.accepted and reply.rc != 6:
+            if not reply.accepted and reply.rc != 6 and self._worker_gone(run):
                 self._settled(run, show, f"the execution engine did not take the run up again ({reply.why()})")
             return
         if self._next_part(run, show):
             return
-        self._settled(run, show)
+        # The engine writes its verdict before it lets the worker's session go (a few seconds later): the run's
+        # checkouts stay until it has.
+        if self._worker_gone(run):
+            self._settled(run, show)
+
+    def _session(self, run: AgentRun) -> str:
+        """The run's worker's tmux session: as kept before it was dispatched, else as the engine names its folder's
+        (a run in the shared workspace, or one dispatched by an older runner)."""
+        kept = json.loads(run.snapshot or "{}").get("session")
+        if kept:
+            return kept
+        if run.folder and not self._owned(run):
+            raise OSError(f"{run.folder} is no longer the runner's folder and the run kept no session: its worker "
+                          "cannot be told apart from another's")
+        return self.d.engine.folder_session(Path(self.root(run)))
+
+    def _timed_out(self, run: AgentRun) -> str | None:
+        """Why the run is stopped for its time, or None while it has time left."""
+        if not self._overdue(run):
+            return None
+        return f"the run did not finish in {self._given(run).total_seconds() / 3600:g} h and was stopped"
+
+    def _worker_gone(self, run: AgentRun) -> bool:
+        """For a run in a folder of its own: its worker's session ended (Engine.end_session), the attempt being over
+        in the engine. True at once for a run in the shared workspace, whose next holder's dispatch takes over the
+        folder's session."""
+        if not run.folder:
+            return True
+        session = self._session(run)
+        if self.d.engine.end_session(Path(self.root(run)), session):
+            self.emit("worker_gone", task_id=run.id, run=run.n, session=session)
+            return True
+        self.emit("worker_still_running", task_id=run.id, run=run.n)
+        return False
+
+    def _stop_worker(self, run: AgentRun, why: str) -> bool:
+        """Stop the run in the engine and end its worker. True once the worker's session is gone and the engine
+        counts no attempt of it as live; until then nothing is put back under it, and every later pass, a restarted
+        runner's too, tries again. Why the run stops is kept with it before anything is asked of the engine
+        (`stopping`), so a later pass goes on with the same stop whatever the engine's record says by then."""
+        snap = json.loads(run.snapshot or "{}")
+        if not snap.get("stopping"):
+            snap["stopping"] = {"why": why}
+            run = self.store.update_run(run.id, snapshot=json.dumps(snap))
+        session = self._session(run)
+        if run.folder and not self._owned(run):
+            # The folder was replaced or a link stands in it: its path may lead to another folder (a ticket's), so
+            # the engine is not asked to stop it by path; the run's own session, by its kept name, is ended.
+            gone = self.d.engine.end_session(Path(run.folder), session)
+        else:
+            gone = self.d.engine.stop_worker(Path(self.root(run)), session)
+        show = self.d.engine.show(run.id)
+        if gone and not (show and show.get("attempt_live")):
+            self.emit("worker_gone", task_id=run.id, run=run.n, session=session)
+            return True
+        self.emit("stop_unconfirmed", task_id=run.id, run=run.n,
+                  reason="its worker is still running" if not gone else "the engine still counts its attempt as live")
+        return False
 
     # -- the closing review, part by part -----------------------------------------------------------
     #
@@ -567,7 +878,7 @@ class WorkspaceRun:
         k = self._reviewing(rv)
         if k == 1 and not rv.get("again"):
             return self.RESUME
-        link = self.review_link(run, k).relative_to(self.cfg.paths.workspace.resolve()).as_posix()
+        link = self.review_link(run, k).relative_to(self._home(run)).as_posix()
         return f"{self.RESUME} The reviewer is reading {self._part_file(k)}: finish with your summary starting with `{link}`."
 
     def _next_part(self, run: AgentRun, show: dict) -> bool:
@@ -618,7 +929,7 @@ class WorkspaceRun:
         rv = self._review_state(run)
         k = self._reviewing(rv)
         again = bool(rv.get("again"))
-        ws = self.cfg.paths.workspace.resolve()
+        ws = self._home(run)
         self._link_report(run, k)
         link = self.review_link(run, k).relative_to(ws).as_posix()
         if again:
@@ -626,7 +937,7 @@ class WorkspaceRun:
         else:
             text = self.PART_REVIEW.format(done=", ".join(rv["parts"][:k - 1]), name=self._part_file(k), link=link)
         reply = self.d.engine.send(task_id=run.id, message_id=f"review-{run.id}-{'again-' if again else ''}{k}",
-                                   source="other", author=run.requested_by, repo=Path(self.cfg.paths.workspace),
+                                   source="other", author=run.requested_by, repo=Path(self.root(run)),
                                    text=text, clearance=trusted(text), extra_dirs=self._extra_dirs(run))
         if reply.accepted:
             self._set_review_state(run, {**rv, "sent": True})
@@ -678,9 +989,13 @@ class WorkspaceRun:
 
     def _settled(self, run: AgentRun, show: dict | None, problem: str | None = None) -> None:
         """The run is over (or never took place): keep what it found, then review it or put the workspace back."""
-        found, problems = self._read(run)
-        # Before the outcome: a kind may judge a run whose report was disputed differently (qa.outcome_of).
-        found = {**found, **self._review_notes(run, show, problem)}
+        if run.folder and not self._owned(run):
+            # Read through a link put in the folder's place, the "report" could be anything: none is read.
+            found, problems = self._empty(), [f"{run.folder} is no longer the runner's folder: its report was not read"]
+        else:
+            found, problems = self._read(run)
+            # Before the outcome: a kind may judge a run whose report was disputed differently (qa.outcome_of).
+            found = {**found, **self._review_notes(run, show, problem)}
         fatal = [problem] if problem else []
         if show and not problem:
             if show.get("state") in ("needs_input", "blocked"):
@@ -708,18 +1023,57 @@ class WorkspaceRun:
         """Every repository back on the branch it was on, what the run left stashed, the run's branch gone.
         Each step looks at where things are first, so a crash halfway is finished on the next tick."""
         snap = json.loads(run.snapshot)
+        if run.folder:
+            # Its checkouts and refs go; the clones a ticket may be working in are not touched otherwise. What the
+            # run left in a checkout goes with it: nothing of it was asked for, and a stash would land in the
+            # clone's own list, a ticket's.
+            ws = self.cfg.paths.workspace
+            owned = self._owned(run)
+            names = [r["repo"] for r in snap["repos"]]
+            names += [n for n in snap.get("pinned") or {} if n not in names]
+            for name in names:
+                dest = None
+                if owned:
+                    try:
+                        dest = self._checkout(run, name)
+                    except OSError as e:  # a link on the way: whatever it leads to is not the runner's to remove
+                        self.emit("checkout_left", task_id=run.id, run=run.n, repo=name, reason=str(e))
+                if dest is not None:
+                    self._drop(run, ws / name, dest)
+                else:
+                    self.git.drop_ref(ws / name, self._pinned(run))
+            if owned:
+                restore_workspace(self.git, self.root(run), snap["branch"], [], None, stash_message="",
+                                  on_stashed=lambda repo, stash: None, on_committed=lambda repo, sha: None)
+            else:
+                # The folder was replaced or moved since: nothing in it is removed, only the run's refs in the clones.
+                self.emit("folder_not_ours", task_id=run.id, run=run.n, folder=run.folder)
+        else:
+            self._restore_shared(run, snap)
+        run = self.store.update_run(run.id, state="publishing")
+        self.emit("workspace_restored", task_id=run.id, run=run.n)
+        self._publish(run)
+
+    def _drop(self, run: AgentRun, clone: Path, dest: Path) -> None:
+        """A run's checkout of `clone` at `dest` gone, and the run's ref in the clone. Safe to repeat."""
+        left = self.git.drop_checkout(clone, dest)
+        if left:
+            self.emit("leftovers_dropped", task_id=run.id, run=run.n,
+                      repo=str(dest.relative_to(self.repos_dir(run))), files=len(left))
+        self.git.drop_ref(clone, self._pinned(run))
+
+    def _restore_shared(self, run: AgentRun, snap: dict) -> None:
         restore_workspace(
             self.git, self.cfg.paths.workspace, snap["branch"], [r for r in snap["repos"] if r["switch"]],
             snap.get("home_prev"), stash_message=f"arceus: what {self.NOUN} {run.id} left",
             on_stashed=lambda repo, stash: self.emit("leftovers_stashed", task_id=run.id, run=run.n, repo=repo,
                                                      stash=stash),
             on_committed=lambda repo, sha: self.emit("committed", task_id=run.id, run=run.n, repo=repo, sha=sha))
-        run = self.store.update_run(run.id, state="publishing")
-        self.emit("workspace_restored", task_id=run.id, run=run.n)
-        self._publish(run)
 
     def _close(self, run: AgentRun, outcome: str, why: str, extra: dict | None = None) -> None:
-        """A run that never reached the agent: it still gets its report, saying why."""
+        """A run that never reached the agent: it still gets its report, saying why. What it pinned goes first."""
+        if not self._unpin(run):
+            return
         result = {**self._empty(), "problems": [], "fatal": [] if outcome in self.QUIET else [why], "engine": None,
                   "settled_at": self.d.now().isoformat()}
         fields = {"snapshot": json.dumps(extra)} if extra else {}
@@ -742,10 +1096,11 @@ class WorkspaceRun:
         view = self.view(run, finished)
         write_atomic(folder / "result.json", json.dumps(view, ensure_ascii=False, indent=1))
         write_atomic(folder / "report.html", self._render(view))
+        mine = not run.folder or self._owned(run)  # never removed from a folder that is no longer the runner's
         out = self.out_dir(run)
-        if out.is_dir() and not out.is_symlink():
+        if mine and out.is_dir() and not out.is_symlink():
             shutil.rmtree(out)
-        linked = self.review_link(run).parent if self.REPORT_FILE else None
+        linked = self.review_link(run).parent if self.REPORT_FILE and mine else None
         if linked and linked.is_dir() and not linked.is_symlink() and not linked.parent.is_symlink():
             shutil.rmtree(linked)
         run = self.store.update_run(run.id, state="done", finished_at=finished)

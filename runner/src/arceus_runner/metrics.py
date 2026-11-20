@@ -123,9 +123,11 @@ class Metrics:
         # review has the workspace and the engine.
         busy = store.tasks("claimed", "dispatched", "publishing") or store.review_holding()
         # A background agent's run holds the workspace and the engine too; the dashboard says Testing or Reviewing
-        # architecture for it.
+        # architecture for it. A test run in a folder of its own works beside a ticket: the ticket is shown, and the
+        # test run when there is none (each is listed on its own row of arceus_task either way).
         run = store.run_holding() if hasattr(store, "run_holding") else None
-        self.busy.set(BUSY_RUN[run.kind] if run else 1 if busy else 0)
+        apart = store.run_apart() if hasattr(store, "run_apart") else None
+        self.busy.set(BUSY_RUN[run.kind] if run else 1 if busy else BUSY_RUN[apart.kind] if apart else 0)
 
     def update_cleanup(self, cleanup) -> None:
         self.cleanup_ok.clear()
