@@ -6,8 +6,8 @@
 # and can read the runner's tokens.
 
 # Pinned tool versions. Change them here, re-run setup: the old version is replaced.
-CLAUDE_CODE_VERSION=2.1.328
-CODEX_VERSION=0.170.0
+CLAUDE_CODE_VERSION=2.1.329
+CODEX_VERSION=0.171.0
 CHROME_DEVTOOLS_MCP_VERSION=1.10.1   # must match Bulava's engine/supervisor/automation-mcp.json
 # Google Sheets, Docs and Drive for the agent, read-only (README, "Google documents"). Empty: no Google.
 WORKSPACE_MCP_VERSION=2.3.0
@@ -17,7 +17,7 @@ WORKSPACE_MCP_VERSION=2.3.0
 # /var/lib/arceus/bulava.git), or a branch to follow. To update: `git ls-remote <source> refs/heads/main`,
 # check engine/SERVER.md, re-run setup between tasks (it refuses while a task is running).
 BULAVA_SOURCE=https://github.com/Stepanokdev/bulava
-BULAVA_REF=cf2b0a89830405a36383768254c3ca2cab47ea6f   # main, 1.20.1 (2026-11-19)
+BULAVA_REF=d59da14949e2b7a8a92d455e2af66a1f51d5912b   # main, 1.20.3 (2026-11-20)
 
 # Python packages of this install's own: a tracker, a code host or an advisory register kept outside this
 # repository (docs/integrations.md), whose module config.yaml names in `type`. Pip requirements separated by
