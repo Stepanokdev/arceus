@@ -314,7 +314,7 @@ class Engine:
         except FileNotFoundError:
             return None
         except OSError as e:
-            raise EngineError(f"the engine's record of the task in {repo} cannot be read ({e})") from None
+            raise EngineError(f"the engine's record of the task of session {session} cannot be read ({e})") from None
 
     def _tmux_args(self) -> tuple[dict[str, str], list[str]]:
         """tmux as the engine calls it: on a server its workers live in a tmux server of the engine's own, `-L

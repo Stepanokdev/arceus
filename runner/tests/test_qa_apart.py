@@ -1409,7 +1409,12 @@ def test_a_start_cut_off_between_the_session_and_its_record_is_still_the_runs_to
         if named == "none":
             (instance / "task-id").unlink(missing_ok=True)
         else:
-            (instance / "task-id").write_text("qa-0\n")  # the engine has no running qa-0: an earlier run's
+            (instance / "task-id").write_text("qa-0\n")
+            # qa-0: an earlier run, whose work ended an hour before this run asked the engine.
+            ended = (w.now - timedelta(hours=1)).isoformat()
+            w.set_engine(lambda s: s["tasks"].update({"qa-0": {
+                "task_id": "qa-0", "state": "done", "attempt_live": False, "project": str(home(w)),
+                "attempts": [{"n": 1, "started_at": ended, "ended_at": ended}]}}))
         raise OSError("the runner dies before the engine names the task")
     with monkeypatch.context() as m:
         m.setattr(engine, "dispatch", session_then_die)
@@ -1447,3 +1452,61 @@ def test_a_preparing_run_whose_home_became_a_link_waits_for_its_own_worker_by_it
     assert run.state == "done" and name not in sessions(w) and gone_before_restored(w)
     assert session(w, w.cfg.paths.workspace) in sessions(w) and w.store.task("ACME-1").state == "dispatched"
     assert str(w.cfg.paths.workspace) not in stops(w) and refs(w, w.repo) == ""
+
+
+@pytest.mark.parametrize("then", ["stop", "deadline"])
+def test_after_busy_a_worker_whose_task_reached_its_verdict_is_still_not_the_runs(w, monkeypatch, then):
+    """Busy, the runner died before it recorded it, and by the restart the other task has its verdict (done) while
+    its session is still there (the engine lets it go a few seconds later). Its work had not ended when this run
+    asked, so the session is that task's: the stop or the end of this run's time waits for it, touches nothing of
+    the folder, and the run closes once it has gone, never dispatched again."""
+    engine = w.runner.qa.d.engine
+    real = engine.dispatch
+
+    def busy_then_die(**kw):
+        another_task_in_the_folder(w)
+        reply = real(**kw)
+        assert reply.rc == 6
+        raise OSError("the runner dies before it records busy")
+    with monkeypatch.context() as m:
+        m.setattr(engine, "dispatch", busy_then_die)
+        w.store.add_run("qa", "command", "ops", scenario=1)
+        w.tick()
+    other = session(w)
+    n = len(dispatches(w))
+    later = (w.now + timedelta(minutes=5)).isoformat()
+    w.set_engine(lambda s: s["tasks"]["qa-0"].update(
+        state="done", attempt_live=False, attempts=[{"n": 1, "started_at": w.now.isoformat(), "ended_at": later}]))
+    w.restart()
+    if then == "stop":
+        w.store.update_run(RID, stop_requested=1)
+    else:
+        w.now += w.cfg.qa.timeout + timedelta(minutes=1)
+    before = its_files(w)
+    w.tick()
+    w.tick()
+    assert w.store.run(RID).state == "preparing" and its_files(w) == before and other in sessions(w)
+    assert stops(w) == [] and len(dispatches(w)) == n
+    w.set_engine(lambda s: s["sessions"].remove(other))
+    w.tick()
+    run = w.store.run(RID)
+    assert run.state == "done" and len(dispatches(w)) == n and refs(w, w.repo) == ""
+
+
+def test_a_task_id_the_runner_cannot_read_is_an_engine_error_and_nothing_goes(w, monkeypatch):
+    queue(w)
+    co = checkout(w)
+    w.store.update_run(RID, state="preparing")
+    w.set_engine(lambda s: s["tasks"].pop(RID))
+    instance = w.cfg.paths.bulava_state / "instances" / session(w).removeprefix("night-")
+    (instance / "task-id").chmod(0)
+    try:
+        with pytest.raises(EngineError, match="cannot be read"):
+            w.runner.qa.d.engine.session_task(session(w))
+        w.store.update_run(RID, stop_requested=1)
+        w.tick()
+        assert w.store.run(RID).state == "preparing" and co.exists() and refs(w, w.repo) != ""
+        assert session(w) in sessions(w)
+        assert any("cannot be read" in e["reason"] for e in w.events_named("qa_step_failed"))
+    finally:
+        (instance / "task-id").chmod(0o644)

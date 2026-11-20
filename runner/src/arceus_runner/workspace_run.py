@@ -140,6 +140,12 @@ FOLDER_MARK_TEXT = ("The Arceus runner's folder for test runs (config qa.workspa
                     "checkouts here; keep nothing of your own in it.\n")
 
 
+def _when(stamp: str) -> datetime:
+    """An ISO time as the engine or the runner wrote it (`Z` or an offset)."""
+    when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
 def own_git(home: Path) -> bool:
     """Whether `home` has a git folder of its own, or none yet: never a link, nor a `.git` file (`gitdir:`) that would
     send every git command run there into another repository's metadata (a ticket's)."""
@@ -656,7 +662,7 @@ class WorkspaceRun:
         if run.folder:
             # Kept before the engine is asked: only a run that asked, and was not told `busy`, may take the folder's
             # session for its own after a crash (reconcile). A session there otherwise is another task's.
-            run = self._set_snapshot(run, asked=True)
+            run = self._set_snapshot(run, asked=True, asked_at=self.d.now().astimezone(timezone.utc).isoformat())
         reply = self.d.engine.dispatch(task_id=run.id, message_id=f"{self.KIND}-{run.id}", author=run.requested_by,
                                        source="other", branch=branch, base=HOME_BRANCH, repo=Path(root),
                                        text=snap["text"], clearance=trusted(snap["text"]), extra_dirs=extra,
@@ -865,14 +871,28 @@ class WorkspaceRun:
         - it names none, or a task no longer at work there (an earlier run's): this run's own start, cut off between
           the session and the record, if it asked the engine to start; nobody's it knows of otherwise.
         An engine that cannot say is an EngineError: nothing is done meanwhile."""
-        if not json.loads(run.snapshot or "{}").get("asked"):
+        snap = json.loads(run.snapshot or "{}")
+        if not snap.get("asked"):
             return False
         named = self.d.engine.session_task(session)
         if named is None or named == run.id:
             return True
+        # Another task is named. It is an earlier run's, left from before, only if its work was over before this run
+        # asked the engine; one at work when this run asked made the engine answer busy, and the session is its own
+        # whatever its record says by now (a verdict comes a few seconds before its session goes).
         other = self.d.engine.show(named)
-        at_work = bool(other) and other.get("state") in ("queued", "running") and other.get("attempt_live") is True
-        return not at_work
+        if other is None:
+            return True  # the engine keeps no record of it: no task at work there
+        if other.get("state") in ("queued", "running"):
+            return False
+        asked = snap.get("asked_at")
+        ended = [a.get("ended_at") for a in other.get("attempts") or []]
+        if not asked or not ended or not all(ended):
+            return False  # when its work ended is not known: never taken for this run's
+        try:
+            return max(_when(e) for e in ended) < _when(asked)
+        except (TypeError, ValueError):
+            return False  # a time it cannot read: never taken for this run's
 
     def _set_snapshot(self, run: AgentRun, **fields) -> AgentRun:
         snap = {**json.loads(self.store.run(run.id).snapshot or "{}"), **fields}
