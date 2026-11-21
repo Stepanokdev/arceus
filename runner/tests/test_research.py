@@ -10,6 +10,7 @@ import pytest
 
 from arceus_runner.texts import ANSWER_PART, split_answer
 
+from .conftest import org_words
 from .test_delivery import World, git, no_real_tools, take  # noqa: F401  (no_real_tools: autouse)
 
 EMPTY_DIFF_WHY = ("Declared 'succeeded_research' with an empty diff — no machine verification of a no-change/"
@@ -65,6 +66,7 @@ def test_the_research_tag_makes_a_question_and_the_agent_is_told_so(w):
     [d] = w.calls("dispatch")
     text = d["argv"][-1]
     assert text.startswith("ACME-1: Why is login slow") and "This is a research ticket" in text
+    assert not org_words(text)
     assert f"`{answer_file(w)}`" in text and "succeeded_research" in text
     [claim] = [t for t in w.bot_comments() if "[arceus:claim]" in t]
     assert "No merge request will be opened" in claim and "merge requests will appear" not in claim

@@ -377,7 +377,7 @@ class ReviewLoop:
                     self.events.emit("review_signal", task_id=task.task_id, kind="ticket", author=x.author)
 
     def _ticket_moved_on(self, task: Task) -> bool:
-        """Someone moved the ticket past Code Review by hand: the team took it from here."""
+        """Someone moved the ticket past Code Review by hand: the automated review stops there."""
         c = self.cfg.tracker
         state = self.d.tracker.issue(task.task_id).state
         if state in (c.states.code_review, c.states.in_progress):

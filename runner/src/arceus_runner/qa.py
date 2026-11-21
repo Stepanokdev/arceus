@@ -627,7 +627,7 @@ class QaAgent(WorkspaceRun):
                  "```markdown", "- [ok] Sign in with the test account — the dashboard opens",
                  "- [problem] Reset the password — the link in the e-mail gives 404", "```", "",
                  "Keep every check in this form and no other line starting with a mark: the runner counts these "
-                 "lines to show the team how far the run has got. A check you add later is a new line in the same "
+                 "lines to show how far the run has got. A check you add later is a new line in the same "
                  "form. The plan is where you are: after a restart, or when your earlier context is gone, read it "
                  "and go on from the first line still marked `[ ]`. Your report's `tested` is made from it.", "",
                  "Aim to cover most of the plan; covering every line is not required. A check this test stand cannot "
@@ -686,13 +686,13 @@ class QaAgent(WorkspaceRun):
                              f"`git -C {ws / r['repo']} show {r['sha']}:<path>` and `git grep <text> {r['sha']}`.")
         lines += ["", "## Your report", "",
                   f"Write it to {out / FINDINGS} as JSON:", "", "```json", SCHEMA_EXAMPLE, "```", "",
-                  "- `summary`: two or three short sentences for the team's chat, at most 500 characters: what you tested "
+                  "- `summary`: two or three short sentences for the notification channel, at most 500 characters: what you tested "
                   "and what you found. The details belong in `tested` and `findings`.",
                   "- `blocked`: empty, or why you could not test at all.",
                   "- `tested`: each thing you checked, with `result` \"ok\", \"problem\", \"blocked\" or \"skipped\" "
                   "and a `note` where it helps. `group` is the `## ` heading of its line in your plan (a user story, "
                   "a feature, a screen). `cases` is what you actually did for it, one entry per case with its own "
-                  "`result`: the team reads them to know what \"ok\" covers. A check and its cases fit in one part; "
+                  "`result`: the report's readers use them to know what \"ok\" covers. A check and its cases fit in one part; "
                   "split a check that needs more into several, by point for one. A \"blocked\" or "
                   "\"skipped\" check lists the cases you tried before it stopped (an empty list, if you tried none) "
                   "and says why in `note`. A \"problem\" check names its finding by number in `finding`: its place "
@@ -721,7 +721,7 @@ class QaAgent(WorkspaceRun):
                   "In every text, put file paths, lines, names from the code and commits in backticks "
                   "(`app/urls.py:12`, `get_cart()`): the report shows them as code.", "",
                   "Write the report's texts in the language the instructions below are written in. The runner reads "
-                  "the file, builds the report and tells the team; you cannot post anywhere yourself. Write it as "
+                  "the file, builds the report and posts it; you cannot post anywhere yourself. Write it as "
                   f"compact JSON, without indentation, and keep it under {PART_BYTES // 1000} KB: a longer report "
                   f"goes on in `{part_name(2)}`, `{part_name(3)}` and so on, each under {PART_BYTES // 1000} KB, "
                   "with more entries of `tested` and `findings` (the findings first, then the checks), and then "

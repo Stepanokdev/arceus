@@ -31,7 +31,7 @@ HOME_IGNORE = """\
 
 
 PROJECT_NOTES_LIMIT = 16 * 1024  # bytes: every session of every task reads them whole
-PROJECT_NOTES_HEAD = ("These notes come from the people who run this project. Where they contradict the server's "
+PROJECT_NOTES_HEAD = ("These are the project's notes. Where they contradict the server's "
                       "notes or the rules above, those win.")
 
 
@@ -121,14 +121,14 @@ def research_brief(answer: Path) -> str:
     """What the agent is told, after the ticket's own text, when the ticket asks a question instead of a change."""
     return "\n".join([
         "## How this ticket is handled", "",
-        "This is a research ticket: the people who queued it want an answer, not a code change. No merge request "
+        "This is a research ticket: it asks for an answer, not a code change. No merge request "
         "is opened for it, and nothing you commit is published.", "",
         "- Read the code, its history and whatever else you need, and run what helps you answer: tests, a script, "
         "the app. Leave every repository as you found it: commit nothing, and undo whatever you changed to check "
         "something.",
         f"- Write the full answer in Markdown to `{answer}`. Start with the answer itself, then the evidence for it "
         "(files and lines, commands and what they showed). Keep what you verified apart from what you assume or "
-        "recommend. The runner posts the file on the ticket as it is, so write it for the people who asked, in "
+        "recommend. The runner posts the file on the ticket as it is, so write it for whoever reads the ticket, in "
         "English.",
         "- Then declare the outcome succeeded_research, with the answer in a few sentences as the summary.",
         "- When the answer depends on a decision or access only a person has, ask, as on any ticket.",

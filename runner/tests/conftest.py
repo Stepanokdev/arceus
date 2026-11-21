@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -84,3 +85,12 @@ def nothing_from_this_machine(monkeypatch):
     monkeypatch.setattr("arceus_runner.health.autostart", lambda: [])
     # Nor its free disk: a full CI runner or laptop would stop new tasks in tests that are not about it.
     monkeypatch.setattr("arceus_runner.health.disk", lambda cfg: Check("disk_free", "ok", "50% free (100 GB)"))
+
+
+# What a brief or the screen tells the model names the project and the runner, never a team, a company or managers.
+# "security team test" is the screen's own example of claimed authority, quoted as an attack, and stays.
+ORG_WORDS = re.compile(r"\b(?:team|teams|company|manager|managers|colleagues?)\b", re.I)
+
+
+def org_words(text: str) -> list[str]:
+    return ORG_WORDS.findall(text.replace('"security team test"', ""))

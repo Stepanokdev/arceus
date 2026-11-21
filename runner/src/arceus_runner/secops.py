@@ -1,4 +1,4 @@
-"""Advisory triage: the SecOps agent reads the project's code against the open advisories of the company's advisory
+"""Advisory triage: the SecOps agent reads the project's code against the open advisories of the configured advisory
 register (CVEs, GitHub advisories, vendor notices) and says, per advisory and repository, whether the project is
 affected. The runner sends those verdicts to the register. The agent fixes nothing.
 
@@ -85,7 +85,7 @@ report by these points, and only these:
 5. The summary claims no more than the verdicts show, and its numbers agree with them.
 6. An earlier verdict (`earlier` in advisories.json) changes its word only for a stated reason: a verdict whose word
    differs from the earlier one says in its evidence what is different (the code, the advisory, a mistake in the
-   earlier evidence, or the team's notes on its stack, naming what they say). Every repository with an earlier
+   earlier evidence, or the project's stack notes, naming what they say). Every repository with an earlier
    verdict on an advisory has a verdict on it again: one that no longer carries the component is fixed (after
    affected or fixed) or not_affected, with evidence that it is gone. A changed word without its reason, or an
    earlier verdict with no successor, is grounds for FAIL.
@@ -271,7 +271,7 @@ class SecOpsAgent(WorkspaceRun):
             missing = self._said(a.problem or "the register did not give its text")
             why = missing if a.text is None else self._cleared(
                 json.dumps(entry, ensure_ascii=False, indent=1), run.id, "advisory", {
-                    "source": "a security advisory from the company's advisory register", "author": "unknown",
+                    "source": "a security advisory from the project's configured advisory register", "author": "unknown",
                     "context": f"Triage run {run.n}: an agent reads the project's code against the open security "
                                "advisories and says whether each affects it. This advisory goes to it as data."})
             if why:
@@ -304,7 +304,7 @@ class SecOpsAgent(WorkspaceRun):
 
     def _compose(self, run: AgentRun, instructions: str, repos: list[dict], extra: dict) -> str:
         """The agent's brief: the role, where the advisories are, the code to read, how to judge and report, the
-        closing review's criteria, then the team's notes on its stack. The same inputs give the same text."""
+        closing review's criteria, then the project's stack notes. The same inputs give the same text."""
         ws = self.cfg.paths.workspace.resolve()
         out = self.out_dir(run)
         review = self.review_link(run).relative_to(ws).as_posix()
@@ -326,7 +326,7 @@ class SecOpsAgent(WorkspaceRun):
                  "`earlier`: your verdicts on it from an earlier triage run, by repository. An earlier verdict is "
                  "where to start, not the answer: check it again at the commits below. Change its word only when "
                  "you can say what is different (the code, the advisory, a mistake in the earlier evidence, or the "
-                 "team's notes on its stack, which may rule otherwise than the earlier verdict did), and then say "
+                 "project's stack notes, which may rule otherwise than the earlier verdict did), and then say "
                  "which in the new evidence: for the notes, what they say. A repository with an earlier verdict gets "
                  "a verdict again: if it no longer carries the component, that is `fixed` after `affected` or "
                  "`fixed`, and `not_affected` otherwise, with evidence that the component is gone (the file that used "
@@ -347,7 +347,7 @@ class SecOpsAgent(WorkspaceRun):
             lines += ["", "Never check, and cite no code from: " + ", ".join(f"`{p}`" for p in self.c.skip)
                       + " (`repo` or `repo:path` patterns)."]
 
-        language = extra["language"] or "the language the team's notes below are written in"
+        language = extra["language"] or "the language the project's stack notes below are written in"
         lines += ["", "## How to judge", "",
                   "For each advisory, find the repositories that carry its product or component: they ship it, pin "
                   "it, build it into an image or deploy it. Look at manifests and lock files, Dockerfiles and base "
@@ -382,7 +382,7 @@ class SecOpsAgent(WorkspaceRun):
                   "other report in `artifacts/`. It judges by this:", "", REPORT_CRITERIA]
 
         if instructions.strip():
-            lines += ["", "## The team's notes on its stack", "", instructions.strip()]
+            lines += ["", "## The project's stack notes", "", instructions.strip()]
 
         return "\n".join(lines)
 

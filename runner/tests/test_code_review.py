@@ -14,7 +14,7 @@ from arceus_runner.config import Config, Secrets
 from arceus_runner.http import ServiceError, TransientError
 from arceus_runner.screening import Verdict
 
-from .conftest import GL_TOKEN, YT_TOKEN, example_raw
+from .conftest import GL_TOKEN, YT_TOKEN, example_raw, org_words
 from .test_delivery import World, git, take
 from .test_review import fix_and_settle, later, sends
 
@@ -291,6 +291,7 @@ def test_build_and_dependency_files_alone_do_not_call_a_person(w):
     assert note.startswith("**Code review: ready to merge.**") and "a person" not in note
     assert w.store.review(RID).outcome == "approved"
     prompt = reviews(w)[0]["argv"][-1]
+    assert "Another agent wrote this code" in prompt and not org_words(prompt)
     assert "Read these with extra care" in prompt and "`Makefile`" in prompt and "`package.json`" in prompt
     assert "Listed for a person by the runner" not in prompt                  # test_auth.py is a test
 
@@ -1517,7 +1518,8 @@ def test_a_merge_request_people_wrote_is_reviewed_and_approved(w):
     assert (task.kind, task.state, task.branch) == ("review", "code_review", "")
     [call] = [c for c in w.calls("dispatch") if c["argv"][1] == PEOPLE_RID]
     text = call["argv"][-1]
-    assert "People on the team wrote this code" in text and "Another agent" not in text
+    assert "This is a review-only run for changes submitted separately" in text and "Another agent" not in text
+    assert not org_words(text.replace(ELSEWHERE, ""))  # the ticket's own links are its data, not the runner's words
     assert sha in text and "feature/people into main" in text and "decisions" not in text
     assert git(w.cfg.paths.workspace / "acme-platform", "rev-parse", "HEAD") == sha
     people_verdict(w)

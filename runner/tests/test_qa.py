@@ -19,7 +19,7 @@ from arceus_runner.metrics import Metrics
 from arceus_runner.cli import qa_check
 from arceus_runner.qa import Limits, index_rows, load_findings, outcome_of
 
-from .conftest import GL_TOKEN, YT_TOKEN, read_events
+from .conftest import GL_TOKEN, YT_TOKEN, org_words, read_events
 from .test_delivery import World, git, take
 
 EXAMPLE = Path(__file__).parents[2] / "config" / "qa-instructions.example.md"
@@ -389,6 +389,7 @@ def test_the_engine_review_reads_the_findings_through_a_link_in_artifacts_and_it
     assert link.resolve() == (out_dir(w) / "findings.json").resolve()
     assert json.loads(link.read_text())["findings"][0]["title"] == "Reset link gives 404"
     text = dispatches(w)[0]["argv"][-1]
+    assert not org_words(text)
     assert f"starting with `artifacts/{RID}/findings.txt`" in text and "compact JSON" in text
     finish(w)
     assert not (ws / "artifacts" / RID).exists() and w.store.run(RID).state == "done"

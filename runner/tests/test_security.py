@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import timedelta
@@ -16,7 +17,7 @@ from arceus_runner.screening import (
     parse_verdict, trusted,
 )
 
-from .conftest import example_raw
+from .conftest import example_raw, org_words
 from .test_delivery import World, take
 from .test_review import DEBOUNCE, published
 
@@ -492,6 +493,9 @@ print(json.dumps({{"is_error": False, "modelUsage": {{"claude-test": {{}}}},
     argv = got["argv"]
     assert argv[argv.index("--tools") + 1] == "" and "--strict-mcp-config" in argv
     assert argv[argv.index("--setting-sources") + 1] == "project" and argv[argv.index("--model") + 1] == "sonnet"
+    assert not org_words(POLICY) and "security team test" in POLICY  # the quoted attack stays
+    # Who runs the agent, where and how it signs in to its model are not the screen's to assume.
+    assert not re.search(r"dedicated server|own server|sign-in|subscription|api key|software company", POLICY, re.I)
     assert argv[argv.index("--system-prompt") + 1] == POLICY and json.loads(argv[argv.index("--json-schema") + 1]) == SCHEMA
     assert got["files"] == [] and "arceus-screen-" in got["cwd"]
     # The payload is a JSON value inside the message, never spliced into the instructions.
@@ -532,6 +536,16 @@ def test_the_digest_is_bound_to_the_policy_version(monkeypatch):
     first = digest("text")
     monkeypatch.setattr("arceus_runner.screening.POLICY_VERSION", "next")
     assert digest("text") != first
+
+
+def test_a_changed_policy_comes_with_a_new_policy_version():
+    """Cached verdicts are keyed by POLICY_VERSION: a policy or schema changed under the old version would let a
+    verdict given under the old words stand. Changing either means a new version and this fingerprint with it."""
+    import hashlib
+
+    from arceus_runner import screening
+    seen = hashlib.sha256((POLICY + json.dumps(SCHEMA, sort_keys=True)).encode()).hexdigest()
+    assert (screening.POLICY_VERSION, seen) == ("2026-11-21.1", "89948b4929fcfc61308a9dc95c2ffaa469840040922afc5f3ad66355454b7bdd")
 
 
 def test_live_mode_needs_reviewers():

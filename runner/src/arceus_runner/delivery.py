@@ -1329,7 +1329,7 @@ class Delivery:
         c = self.cfg.tracker
         window = self.cfg.limits.continue_window
         for task in [*self.store.tasks("failed", "stopped"), *(t for t in self.store.tasks("done") if t.research)]:
-            # A task stopped because its ticket was moved on by hand has no `failed_at_ms`: the team took it from there.
+            # A task stopped because its ticket was moved on by hand has no `failed_at_ms`: the review stopped there.
             since = task.published_at_ms if task.state == "done" else task.failed_at_ms
             if not since or not task.branch:
                 continue  # failed before any work existed (no repositories), or before this was possible

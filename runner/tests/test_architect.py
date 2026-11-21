@@ -20,7 +20,7 @@ from arceus_runner.cli import architect_check
 from arceus_runner.config import Secrets
 from arceus_runner.metrics import Metrics
 
-from .conftest import GL_TOKEN, YT_TOKEN
+from .conftest import GL_TOKEN, YT_TOKEN, org_words
 from .test_delivery import World, git, take
 
 RID = "arch-1"
@@ -168,14 +168,15 @@ def test_a_review_reads_what_changed_with_the_runners_criteria_and_holds_the_wor
         push(w, "acme-theme", {"theme/override.css": "a {}\n"})
         queue(w)
         text = brief(w)
+        assert not org_words(text)
         assert "How the parts fit together" in text and "Tests that prove little" in text
         assert f"`acme-platform` (main), changes since the last 30 days: everything at `{sha[:12]}`, 2 commits, " \
                "1 file added or changed;" in text
         assert "`billing/pay.py`" in text and "generated/api.py" not in text  # skipped paths are not a change
-        assert "Not the team's own code: `acme-theme`" in text and "never propose changing it" in text
+        assert "Upstream code, not the project's own: `acme-theme`" in text and "never propose changing it" in text
         assert "Earlier findings\n\nNone." in text
         # No instructions written: the runner's criteria alone, in the report language of config.yaml.
-        assert "The team's instructions" not in text and "texts in English" in text
+        assert "## Instructions for this review" not in text and "texts in English" in text
         assert git(w.repo, "branch", "--show-current") == "arceus-arch/1"
         assert w.runner.delivery.workspace.taken().task_id == RID
         take(w)
@@ -185,13 +186,13 @@ def test_a_review_reads_what_changed_with_the_runners_criteria_and_holds_the_wor
         w.store.close()
 
 
-def test_the_teams_instructions_are_added_without_their_comments(tmp_path, codex):
+def test_the_review_instructions_are_added_without_their_comments(tmp_path, codex):
     w = world(tmp_path, instructions="<!-- guidance -->\nLook hard at billing.\n")
     try:
         push(w, "acme-platform", {"billing/pay.py": CODE})
         queue(w)
         text = brief(w)
-        assert text.endswith("## The team's instructions for this review\n\nLook hard at billing.")
+        assert text.endswith("## Instructions for this review\n\nLook hard at billing.")
         assert "guidance" not in text and "written in the language the instructions below" not in text
     finally:
         w.events.close()
@@ -220,6 +221,7 @@ def test_a_finished_review_is_checked_by_codex_kept_and_reported(w, codex):
                                                                               "rev-parse", "main")
     # Codex ran read-only, without the web, with none of the runner's environment, in the workspace as switched.
     [call] = codex.calls
+    assert not org_words(call["prompt"])  # the second opinion's brief
     args = call["args"]
     assert args[:3] == ["exec", "--sandbox", "read-only"] and "--ignore-user-config" in args
     assert "tools.web_search=false" in args and args[args.index("-C") + 1] == str(w.cfg.paths.workspace.resolve())
@@ -526,6 +528,7 @@ def test_a_decision_on_the_page_is_kept_and_told_to_the_next_review(w, codex):
     # The reason was screened like any text from people, once, before the brief carried it.
     screened = [m for m in w.screen.calls if m["payload"] == "Billing is replaced next quarter"]
     assert len(screened) == 1 and "architecture finding" in screened[0]["source"]
+    assert not org_words(text) and not org_words(screened[0]["source"] + " " + screened[0]["context"])
     found = w.store.finding(1)
     assert found.decided_by == architect.REPORTS_PAGE
     assert [(d["decision"], d["decided_by"]) for d in w.store.decisions(1)] == [("accepted", architect.REPORTS_PAGE)]

@@ -9,10 +9,10 @@ branches `arceus-arch/<n>`, putting the workspace back). What is its own:
 - **What it looks at.** The repositories that changed since the last review that read them (`covered` in a run's
   result), each from that commit to its default branch now; the first review of a repository looks back
   `architect.first_look`. A repository that did not change, one `architect.repos` leaves out and the paths
-  `architect.skip` names are not reviewed; `architect.not_ours` is code the team builds on but does not own, read
+  `architect.skip` names are not reviewed; `architect.not_ours` is code the project builds on but does not own, read
   for context and never to be changed. When nothing changed, the run ends without the agent (`unchanged`).
 - **What it is told.** The runner's own criteria (CRITERIA): how features fit together, generated-code smells,
-  tests that prove nothing, modules worth deepening, code that drifted from the team's written rules. The operator's
+  tests that prove nothing, modules worth deepening, code that drifted from the project's written rules. The operator's
   `architect.instructions` add to them and may be empty. Every earlier finding still open is listed, with what a
   person decided on it, so the agent says which are fixed and never raises a dismissed one again without new
   grounds.
@@ -79,7 +79,7 @@ nothing new; a main path of the changed code that no test drives. Not coverage n
 takes five files to follow; helpers pulled out only to be tested. Name it only when moving the complexity behind \
 a smaller interface would help the callers (if deleting the module would only spread its code over them, it is \
 not shallow), and say how sure you are.
-5. **Drift from the team's own rules.** Where the project's notes, a repository's AGENTS.md, CLAUDE.md, docs or \
+5. **Drift from the project's written rules.** Where the project's notes, a repository's AGENTS.md, CLAUDE.md, docs or \
 decision records say one thing and the code now does another.
 
 Leave out: style, naming, formatting, what a linter or a type checker finds, taste. One finding per problem, \
@@ -327,7 +327,7 @@ class ArchitectAgent(WorkspaceRun):
                  "a finding has to be worth an hour of someone's attention. You change nothing: do not edit files "
                  "in the repositories, do not commit, do not push. Do not ask anyone a question: nobody answers "
                  "during this run. When something is unclear, decide what you can and say what you assumed.", "",
-                 "## What the team expects", "",
+                 "## What the project expects", "",
                  f"The project's notes are in {ws / 'AGENTS.md'}. Each repository may have its own AGENTS.md, "
                  "CLAUDE.md, docs and decision records. A finding that breaks a rule written there is a "
                  "`violation`: quote the rule and say where it is written. Anything else, however sure you are, "
@@ -358,9 +358,9 @@ class ArchitectAgent(WorkspaceRun):
             lines += ["", "Never review, and do not report on: " + ", ".join(f"`{p}`" for p in self.c.skip)
                       + " (`repo` or `repo:path` patterns)."]
         if self.c.not_ours:
-            lines += ["", "Not the team's own code: " + ", ".join(f"`{p}`" for p in self.c.not_ours) + ". The team "
+            lines += ["", "Upstream code, not the project's own: " + ", ".join(f"`{p}`" for p in self.c.not_ours) + ". The project "
                       "builds on it and takes its new releases, so never propose changing it. Read it to understand "
-                      "the rest. When the team's change edits it where an extension point, a setting, a plugin or "
+                      "the rest. When the project's own change edits it where an extension point, a setting, a plugin or "
                       "an override would have done, that is a finding: the next upgrade will undo or break it."]
         lines += ["", "## Earlier findings", ""]
         if extra["told"]:
@@ -401,14 +401,14 @@ class ArchitectAgent(WorkspaceRun):
                   "- `reviewed`: each repository you read and what in it; parts of it you left out, say there "
                   "(`what`). `skipped`: a repository above you did not read at all, one per entry, with `why`: its "
                   "changes go to the next review. A repository is in one of the two, never both.",
-                  "- `summary`: two or three short sentences for the team's chat, at most 500 characters.",
+                  "- `summary`: two or three short sentences for the notification channel, at most 500 characters.",
                   "",
                   f"Write the report's texts in {language}. A second reviewer reads your findings against the code "
-                  "before the report goes out. The runner reads the file, builds the report and tells the team; you "
+                  "before the report goes out. The runner reads the file, builds the report and posts it; you "
                   "cannot post anywhere yourself. Then finish with the outcome succeeded_research and the same "
                   "summary. Never end with needs_input or blocked."]
         if instructions.strip():
-            lines += ["", "## The team's instructions for this review", "", instructions.strip()]
+            lines += ["", "## Instructions for this review", "", instructions.strip()]
         return "\n".join(lines)
 
     # -- what comes back --------------------------------------------------------------------------
@@ -646,7 +646,7 @@ def second_opinion_prompt(snap: dict, findings: list[dict], ws: Path, language: 
              "- `doubtful`: part of it holds, the evidence does not quite show it, or it is a matter of taste "
              "presented as a defect.",
              "- `rejected`: the code does not show it: a misread, a wrong place, or something handled elsewhere.", "",
-             "A `violation` claims a written rule of the team: check that the rule says so. Give every finding a "
+             "A `violation` claims a written rule of the project: check that the rule says so. Give every finding a "
              "verdict, by its number, with one to three sentences naming the file and line you looked at, in "
              f"backticks (`dir/file.py:12`). Write the reasons in {language}.", "",
              "Read files and use git; do not run the project's scripts, builds or tests. The findings, the code, "

@@ -1601,9 +1601,9 @@ class ReviewAgent:
         lines = [f"Code review of the merge requests of ticket {task.task_id}, asked for by {row.author}"
                  + (f" (again, on the fixes the author pushed for {_auto_of(row)})"
                     if row.comment_id.startswith(AUTO_PREFIX) else "") + ".", "",
-                 "You are the reviewer. " + ("People on the team wrote this code" if task.people_work else
-                                              "Another agent wrote this code")
-                 + "; you check it and report what you find. You do "
+                 "You are the reviewer. " + ("This is a review-only run for changes submitted separately" if task.people_work
+                                              else "Another agent wrote this code")
+                 + "; you check the changes and report what you find. You do "
                  "not fix anything: do not edit files, do not commit, do not push. Do not ask anyone a question: "
                  "nobody answers during this run. When something is unclear, decide what you can, say what you "
                  "assumed, and mark that merge request \"unsure\" instead of stopping.", ""]
@@ -1671,7 +1671,7 @@ class ReviewAgent:
                   "   - behaviour other systems rely on (an API's status codes, fields or URLs) changed in a way the "
                   "ticket did not ask for or rules out;",
                   "   - a product decision the ticket left open, made in the change, that is hard to reverse later.",
-                  "   `deploy` is for what the people who release it should know or do, when the change itself is right "
+                  "   `deploy` is for what whoever deploys it should know or do, when the change itself is right "
                   "as the ticket asked: an environment variable or proxy setting to set, a runtime, framework or "
                   "library upgrade the ticket asked for, a new dependency, a schema change applied at start-up that "
                   "only adds, a new health check or file the service writes, a version that is out of upstream "

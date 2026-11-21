@@ -26,7 +26,7 @@ from arceus_runner.events import EventLog
 from arceus_runner.gitops import Git, GitAuth
 from arceus_runner.progress import task_key
 
-from .conftest import GL_TOKEN, FakeClock, example_raw, providers, read_events
+from .conftest import GL_TOKEN, FakeClock, example_raw, org_words, providers, read_events
 from .fakes import FakeGitLab, FakeScreen, FakeYouTrack
 
 FAKE_ENGINE = Path(__file__).with_name("fake_engine.py")
@@ -849,10 +849,10 @@ def test_the_project_notes_end_the_agents_notes_and_each_task_keeps_its_own(tmp_
     take(w)
     task = w.store.task("ACME-1")
     text = (home / "AGENTS.md").read_text()
-    assert text.endswith("- `acme-theme`\n\n## Project notes\n\nThese notes come from the people who run this "
-                         "project. Where they contradict the server's notes or the rules above, those win.\n\n"
+    assert text.endswith("- `acme-theme`\n\n## Project notes\n\nThese are the project's notes. "
+                         "Where they contradict the server's notes or the rules above, those win.\n\n"
                          "## Tests\n\nTest files are `*_spec.py`.\n")
-    assert "for people" not in text and (home / "CLAUDE.md").read_text() == "@AGENTS.md\n"
+    assert "for people" not in text and not org_words(text) and (home / "CLAUDE.md").read_text() == "@AGENTS.md\n"
     [ev] = w.events_named("workspace_home_updated")
     assert ev["project_notes"] == len("## Tests\n\nTest files are `*_spec.py`.") and \
         ev["commit"] == git(home, "rev-parse", "main")
@@ -1837,3 +1837,14 @@ def test_a_merge_the_host_could_not_take_now_is_tried_again(w):
     assert w.store.task("ACME-1").state == "code_review" and w.gl.merge_requests == []
     w.tick()
     assert len(w.gl.merge_requests) == 1 and len(calls) == 2
+
+
+def test_the_example_notes_and_instructions_give_the_agent_no_words_about_a_team():
+    """The templates in config/ reach the agent as their loaders read them, the guidance in comments left out."""
+    from arceus_runner.texts import project_notes
+    from arceus_runner.workspace_run import read_instructions
+    examples = Path(__file__).resolve().parents[2] / "config"
+    assert not org_words(project_notes(examples / "project-notes.example.md"))
+    for name in ("architect-instructions.example.md", "secops-instructions.example.md", "qa-instructions.example.md"):
+        text, _ = read_instructions(examples / name, required=False)
+        assert not org_words(text or ""), name
