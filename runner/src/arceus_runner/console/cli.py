@@ -113,7 +113,7 @@ def env_lines(cfg: Config) -> list[str]:
 def _read_dirs(cfg: Config) -> list[Path]:
     """Folders the pages read: the runner's database's, the reports', the instructions'. Each once, the outermost."""
     wanted = [cfg.paths.db.parent, cfg.qa.reports, cfg.architect.reports, cfg.secops.reports,
-              cfg.qa.instructions.parent, cfg.architect.instructions.parent,
+              cfg.qa.instructions.parent, cfg.architect.instructions.parent, cfg.secops.instructions.parent,
               *([cfg.paths.project_notes.parent] if cfg.paths.project_notes else [])]
     out: list[Path] = []
     for p in sorted({w.resolve() for w in wanted}, key=lambda p: len(p.parts)):

@@ -51,6 +51,11 @@ def project_notes(path: Path | None) -> str:
         raise ProjectNotesError(f"paths.project_notes: {path} does not exist") from None
     except (OSError, UnicodeDecodeError) as e:
         raise ProjectNotesError(f"paths.project_notes: {path} cannot be read ({e})") from None
+    return project_notes_text(text, path)
+
+
+def project_notes_text(text: str, path: Path) -> str:
+    """project_notes for a text already in hand, such as a draft the console checks before saving."""
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S).strip()
     size = len(text.encode())
     if size > PROJECT_NOTES_LIMIT:

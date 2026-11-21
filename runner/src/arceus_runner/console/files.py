@@ -66,6 +66,14 @@ def read(path: Path) -> Current:
         return Current("", digest(data), True, f"{path} is not UTF-8 text: edit it on the server")
 
 
+def writable(path: Path) -> bool:
+    """Whether save can write `path`: it writes a temporary file in the folder (or the nearest one that exists: a save
+    makes the rest) and renames it over the file, and a file kept read-only stays so. A folder mounted read-only into
+    the console's container says no here, before anyone types."""
+    folder = next((p for p in path.parents if p.exists()), path.parent)
+    return os.access(folder, os.W_OK | os.X_OK) and (not path.exists() or os.access(path, os.W_OK))
+
+
 def normal(text: str) -> str:
     """What a browser's textarea sends, as the file keeps it: \\n line ends, one at the end."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -138,6 +146,8 @@ def _save(store: ConsoleStore, kind: str, path: Path, text: str, expected_sha: s
     data = text.encode("utf-8")
     if len(data) > MAX_FILE:
         raise OSError(f"the text is larger than {MAX_FILE // 1024} KB")
+    if not writable(path):  # checked again here: the page may have been opened before the file was made read-only
+        raise OSError(f"{path} is read-only to the console: edit it on the server")
     mode = (path.stat().st_mode & 0o777) if current.exists else 0o600
     version = store.add_version(kind, path, current.sha, current.text if current.exists else None, digest(data), text,
                                 by, note)

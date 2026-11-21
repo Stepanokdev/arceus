@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "macros.html" import flash %}
+{% block body %}
+<h1>Instructions</h1>
+<p class="lede">Every text the agents are given besides the runner's own rules: who reads it and when, who edits it, and whether the agent can be given what it holds now. Each is checked by the runner's own rules before it is saved, and every version saved here is kept with who saved it.</p>
+{{ flash(ctx.query("notice"), error) }}
+<ul class="links instruction-list">
+  {% for r in rows %}
+  <li>
+    {% if r.href %}<a href="{{ r.href }}">{{ r.title }}</a>{% else %}<strong>{{ r.title }}</strong>{% endif %}
+    <span class="note">{{ r.what }}</span>
+    <dl class="instruction-facts">
+      <dt>Read by</dt><dd>{{ r.reader }}</dd>
+      <dt>Edited by</dt><dd>{{ r.editors }}</dd>
+      {% if r.path %}<dt>File</dt><dd><code class="lit">{{ r.path }}</code></dd>{% endif %}
+    </dl>
+    {% if r.outside %}<p class="note">Changed on the server after the last save here ({{ r.outside.at|when }}, {{ r.outside.actor }}): the agent gets the file as it is now.</p>{% endif %}
+    <p class="value-line {{ r.state }}"><span aria-hidden="true">{{ {"good": "✓", "bad": "✕"}.get(r.state, "·") }}</span> {{ r.said }}</p>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

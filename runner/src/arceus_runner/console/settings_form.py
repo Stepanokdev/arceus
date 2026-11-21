@@ -75,7 +75,8 @@ LOCKED_KEYS = ("paths", "health.devstack_check", "bulava.mcp_config", "tracker.t
                "assistant.persona_file", "assistant.knowledge_file", "assistant.port")
 
 # Folders the console reads (cli._read_dirs): moved outside the data folder, setup.sh mounts them for it.
-MOUNTED_KEYS = ("qa.reports", "qa.instructions", "architect.reports", "architect.instructions", "secops.reports")
+MOUNTED_KEYS = ("qa.reports", "qa.instructions", "architect.reports", "architect.instructions", "secops.reports",
+                "secops.instructions")
 
 
 @dataclass
