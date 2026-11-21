@@ -108,6 +108,18 @@ def test_who_sees_the_list_and_who_edits_what(w):
     assert w.notes.read_text().endswith("The product is a school.\n") and not w.secops.exists()
 
 
+def test_a_broken_config_is_not_shown_to_someone_who_may_not_edit(w):
+    qa = person(w.settings, "q@example.com", {"qa"})
+    w.config.write_text(yaml.safe_dump({**w.raw, "no_such_key": 1}))
+    for path in (NOTES, SECOPS):
+        page = qa.get(path)
+        assert page.status_code == 403 and "config.yaml has errors" not in page.text
+        assert qa.post(path, data={"csrf": csrf_of(qa.get("/").text), "sha": "missing",
+                                   "text": "mine"}).status_code == 403
+        page = w.admin.get(path)
+        assert page.status_code == 503 and "config.yaml has errors" in page.text
+
+
 def test_admins_edit_the_notes_and_every_version_is_kept(w):
     page = w.admin.get(NOTES).text
     assert "Project notes" in page and str(w.notes) in page and "bytes left" in page and "keeps its copy" in page

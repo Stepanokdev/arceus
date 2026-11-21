@@ -139,10 +139,10 @@ def index(ctx: Ctx) -> Response:
 
 
 def notes_page(ctx: Ctx) -> Response:
+    ctx.require("notes.edit")  # before the config: its errors are not shown to someone who may not edit
     cfg = _cfg(ctx)
     path = cfg.paths.project_notes
     if path is None:
-        ctx.require("notes.edit")
         # paths is locked in Settings (settings_form.LOCKED_KEYS): it is set on the server, over SSH.
         return message(ctx, "Project notes", "paths.project_notes is not set in config.yaml, so tasks get no notes "
                        "and there is no file to edit. On the server, add `project_notes: "
@@ -159,6 +159,7 @@ def notes_page(ctx: Ctx) -> Response:
 
 
 def secops_page(ctx: Ctx) -> Response:
+    ctx.require("secops.instructions")
     cfg = _cfg(ctx)
     return runs.file_page(
         ctx, kind="secops.instructions", action="secops.instructions", path=cfg.secops.instructions,
