@@ -2,8 +2,22 @@
 {% from "macros.html" import flash %}
 {% block body %}
 <h1>Settings</h1>
-<p class="lede">config.yaml, the runner's settings: <code class="lit">{{ path }}</code>. {% if can(user, "settings.edit") %}Every change is checked as the runner would check it and shown as a difference before it is saved.{% else %}You see them read-only: admins change them.{% endif %} Secrets are not here: they live in secrets.env, which the console never reads.</p>
 {{ flash(notice) }}
+{% if notes %}
+<section class="card project-notes" id="project-notes" aria-labelledby="notes-h">
+  <div class="section-head">
+    <h2 id="notes-h">Project notes</h2>
+    {% if can(user, "notes.edit") %}<a class="btn" href="/settings/project-notes/">{{ "Edit" if notes.path else "How to set up" }}</a>{% endif %}
+  </div>
+  <p>{{ notes.what }} {{ notes.reader }}</p>
+  {% if notes.path %}<p class="meta">File <code class="lit">{{ notes.path }}</code>{% if not can(user, "notes.edit") %}. Admins edit it.{% endif %}</p>{% endif %}
+  {% if notes.outside %}<p class="notice warn">Changed on the server after the last save here ({{ notes.outside.at|when }}, {{ notes.outside.actor }}): the agent gets the file as it is now.</p>{% endif %}
+  <p class="value-line {{ notes.state }}"><span aria-hidden="true">{{ {"good": "✓", "bad": "✕"}.get(notes.state, "·") }}</span> {{ notes.said }}</p>
+  <p class="note">The server's notes win where the two disagree: the rules for every project on the server (when to ask on the ticket, the run summary, checks), which every Claude Code session reads from the run user's <code class="lit">~/.claude/CLAUDE.md</code>. They are not edited here: Arceus' maintainers change <code class="lit">config/agent-notes.md</code> through review.</p>
+</section>
+{% endif %}
+<h2 class="settings-h">The runner's settings</h2>
+<p class="lede">config.yaml, the runner's settings: <code class="lit">{{ path }}</code>. {% if can(user, "settings.edit") %}Every change is checked as the runner would check it and shown as a difference before it is saved.{% else %}You see them read-only: admins change them.{% endif %} Secrets are not here: they live in secrets.env, which the console never reads.</p>
 {% include "settings_loaded.html" %}
 {% if problems %}
 <div class="alert"><p><strong>config.yaml does not load:</strong> the runner would refuse to start.</p><ul>{% for p in problems %}<li><code class="lit">{{ p }}</code></li>{% endfor %}</ul></div>

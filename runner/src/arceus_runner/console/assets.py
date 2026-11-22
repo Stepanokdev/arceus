@@ -275,13 +275,13 @@ pre.diff .ctx { color: var(--muted); }
 /* settings */
 .settings-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .settings-groups .count-note { color: var(--quiet); font-size: 0.8rem; margin-top: 4px; }
-.instruction-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.instruction-list li { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.instruction-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 0;
-                     font-size: 0.875rem; }
-.instruction-facts dt { color: var(--quiet); }
-.instruction-facts dd { margin: 0; overflow-wrap: anywhere; }
-.instruction-list .value-line { margin-top: auto; font-size: 0.9rem; }
+.project-notes { margin: 0 0 28px; }
+.project-notes .section-head { margin-bottom: 8px; }
+.project-notes p { margin: 0 0 10px; overflow-wrap: anywhere; }
+.project-notes .notice { margin: 0 0 10px; }
+.project-notes > :last-child { margin-bottom: 0; }
+.settings-h { margin: 0 0 8px; }
+.file-warn { display: block; margin-top: 4px; color: var(--bad); font-size: 0.875rem; overflow-wrap: anywhere; }
 .settings-form .group { border: 0; border-top: 1px solid var(--line); margin: 18px 0 0; padding: 14px 0 0; min-width: 0; }
 .settings-form .group legend { padding: 0 8px 0 0; font-weight: 600; }
 .settings-form .group .group { margin-left: 12px; }
@@ -336,7 +336,7 @@ pre.oplog { margin: 0; padding: 12px 14px; max-height: 32rem; overflow: auto; ba
 @media (max-width: 760px) {
   .split, .task-split { grid-template-columns: 1fr; }
   .roles-help li { grid-template-columns: 1fr; gap: 2px; }
-  .settings-groups, .ops-links, .instruction-list { grid-template-columns: 1fr; }
+  .settings-groups, .ops-links { grid-template-columns: 1fr; }
   .bar-in { gap: 0 12px; }
   .brand { flex: 1 1 0; min-width: 0; }
   .who { max-width: calc(100% - 7rem); }

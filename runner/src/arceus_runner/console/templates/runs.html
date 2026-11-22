@@ -24,6 +24,7 @@
       <div class="scenario-what">
         {% if can_edit %}<a class="scenario-name" href="/qa/scenarios/{{ sc.n }}/">{{ sc.name }}</a>{% else %}<span class="scenario-name">{{ sc.name }}</span>{% endif %}
         <span class="note">{{ sc.when }}{% if sc.next %} · next {{ sc.next }}{% endif %}</span>
+        {% if sc.warn %}{% if sc.warn.state == "bad" %}<span class="file-warn">{{ sc.warn.said[:1]|upper }}{{ sc.warn.said[1:] }}: its runs do not start until it is fixed.</span>{% endif %}{% if sc.warn.outside %}<span class="note">Instructions changed on the server after the last save here ({{ sc.warn.outside.at|when }}): a run gets the file as it is now.</span>{% endif %}{% endif %}
       </div>
       <div class="scenario-do">
         {% if sc.run %}<a class="tag {{ 'quiet' if sc.run.state == 'pending' else 'busy' }}" href="/qa/{{ sc.run.n }}/">Run {{ sc.run.n }}: {{ "queued" if sc.run.state == "pending" else "under way" }}</a>
@@ -41,6 +42,10 @@
 <h2 class="runs-h">Runs</h2>
 {% endif %}
 
+{% if warn %}
+<p class="notice {{ 'err' if warn.state == 'bad' else 'warn' }}">{{ "Review instructions" if kind == "arch" else "Triage notes" }}: {% if warn.state == "bad" %}{{ warn.said }}: no run starts until it is fixed.{% endif %}{% if warn.outside %} Changed on the server after the last save here ({{ warn.outside.at|when }}, {{ warn.outside.actor }}): a run gets the file as it is now.{% endif %}</p>
+{% endif %}
+
 {% if kind == "arch" %}
 <div class="toolbar">
   {% if can_run and enabled %}
@@ -49,6 +54,10 @@
   {% if can_edit %}<a class="btn" href="{{ base }}instructions/">Review instructions</a>{% endif %}
   {% block extra_tools %}{% endblock %}
 </div>
+{% endif %}
+
+{% if kind == "secops" and can_edit %}
+<div class="toolbar"><a class="btn" href="/secops/instructions/">Triage notes</a></div>
 {% endif %}
 
 {% block before_list %}{% endblock %}

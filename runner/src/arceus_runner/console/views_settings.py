@@ -15,7 +15,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from arceus_runner.config import ConfigError, parse_config
-from arceus_runner.console import files
+from arceus_runner.console import files, views_instructions
 from arceus_runner.console import settings_form as sf
 from arceus_runner.console.web import Ctx, Gone, as_number, page
 from arceus_runner.db import ReviewStore
@@ -72,6 +72,7 @@ def overview(ctx: Ctx) -> Response:
             groups.append({"name": name, "title": title, "what": what, "count": len(flat),
                            "in_file": sum(1 for f in flat if f.in_file)})
     return ctx.render("settings.html", title="Settings", groups=groups, problems=problems, path=_path(ctx),
+                      notes=views_instructions.notes_row(ctx, cfg) if cfg is not None else None,
                       current=current, loaded=_loaded(ctx, current.sha), restart=_restart_hint(ctx),
                       notice=ctx.query("notice"),
                       versions=ctx.store.versions(KIND, 5))

@@ -15,7 +15,7 @@ from starlette.routing import Route
 
 from arceus_runner import arch_report
 from arceus_runner import architect as architect_mod
-from arceus_runner.console import links, runs
+from arceus_runner.console import links, runs, views_instructions
 from arceus_runner.console.store import ConsoleError
 from arceus_runner.console.web import Ctx, Gone, Markup, page
 from arceus_runner.db import ReviewStore
@@ -68,7 +68,8 @@ def index(ctx: Ctx) -> Response:
                       rows=runs.dress(rows, arch_report.head_of), enabled=cfg.architect.enabled,
                       error=error or db_error, notice=ctx.query("notice"), mode=cfg.mode,
                       can_run=ctx.can("arch.run"), can_edit=ctx.can("arch.instructions"),
-                      schedule=cfg.architect.schedule, counts=(open_, decided, fixed))
+                      schedule=cfg.architect.schedule, counts=(open_, decided, fixed),
+                      warn=views_instructions.warning(ctx, "arch.instructions", cfg.architect.instructions, False))
 
 
 def report(ctx: Ctx) -> Response:

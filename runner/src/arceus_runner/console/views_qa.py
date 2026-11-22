@@ -15,7 +15,7 @@ from starlette.routing import Route
 
 from arceus_runner import qa as qa_mod
 from arceus_runner import qa_report, qa_scenarios
-from arceus_runner.console import files, runs
+from arceus_runner.console import files, runs, views_instructions
 from arceus_runner.console.store import ConsoleError
 from arceus_runner.console.web import Ctx, Gone, as_number, page
 from arceus_runner.db import RUN_UNDER_WAY, AgentRun, ReviewStore
@@ -35,9 +35,10 @@ def _n(ctx: Ctx) -> int:
     return ctx.number("n")
 
 
-def _scenario_rows(store: ReviewStore, cfg) -> list[dict]:
-    """Each scenario as the list shows it: its schedule in words, when it is next due, and its run queued or under
-    way, if any."""
+def _scenario_rows(ctx: Ctx, store: ReviewStore, cfg) -> list[dict]:
+    """Each scenario as the list shows it: its schedule in words, when it is next due, its run queued or under way,
+    if any, and what is wrong with its instructions file, if anything (a run would stop on it, or it was changed on
+    the server)."""
     busy: dict[int, AgentRun] = {}
     for r in store.runs("qa", *RUN_UNDER_WAY):
         busy.setdefault(r.scenario, r)
@@ -47,7 +48,9 @@ def _scenario_rows(store: ReviewStore, cfg) -> list[dict]:
         plan = qa_scenarios.plan_of(sc)
         due = qa_scenarios.next_time(plan, now, cfg.schedule.tz)
         rows.append({"n": sc.n, "name": sc.name, "when": qa_scenarios.describe(plan), "on": plan.active,
-                     "next": f"{due:%a %d %b, %H:%M}" if due else "", "run": busy.get(sc.n)})
+                     "next": f"{due:%a %d %b, %H:%M}" if due else "", "run": busy.get(sc.n),
+                     "warn": views_instructions.warning(ctx, qa_scenarios.history_kind(sc),
+                                                        qa_scenarios.file_of(cfg.qa, sc), required=True)})
     return rows
 
 
@@ -75,7 +78,7 @@ def index(ctx: Ctx) -> Response:
     else:
         try:
             rows, db_error = qa_mod.index_rows(store, cfg.qa.reports), ""
-            scenarios = _scenario_rows(store, cfg)
+            scenarios = _scenario_rows(ctx, store, cfg)
         finally:
             store.close()
     return ctx.render("runs.html", status=400 if error else 200, title="Test runs", kind="qa",

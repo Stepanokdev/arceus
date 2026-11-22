@@ -1,6 +1,7 @@
-"""Advisory triage (secops.py) in the console, for reading: the list of triage runs and a run's report, rendered from
-its result.json as a test run's is (runs.report_page). Nothing here starts or stops a run or edits the team's notes:
-a run is started by `arceus-runner secops run` or `secops.schedule` and stopped by `secops stop`, on the server."""
+"""Advisory triage (secops.py) in the console: the list of triage runs and a run's report, rendered from its
+result.json as a test run's is (runs.report_page), and the way to the team's notes, which admins edit
+(views_instructions). Nothing here starts or stops a run: a run is started by `arceus-runner secops run` or
+`secops.schedule` and stopped by `secops stop`, on the server."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from arceus_runner import secops
-from arceus_runner.console import runs
+from arceus_runner.console import runs, views_instructions
 from arceus_runner.console.store import ConsoleError
 from arceus_runner.console.web import Ctx, Markup, page
 from arceus_runner.db import ReviewStore
@@ -39,7 +40,9 @@ def index(ctx: Ctx) -> Response:
         r["summary"] = Markup(rich(r["summary"]))
     return ctx.render("runs.html", title="Advisory triage", kind="secops",
                       rows=runs.dress(rows, secops.head_of, "secops"), enabled=cfg.secops.enabled, error=error,
-                      mode=cfg.mode, schedule=cfg.secops.schedule)
+                      notice=ctx.query("notice"),
+                      mode=cfg.mode, schedule=cfg.secops.schedule, can_edit=ctx.can("secops.instructions"),
+                      warn=views_instructions.warning(ctx, "secops.instructions", cfg.secops.instructions, False))
 
 
 def run(ctx: Ctx) -> Response:

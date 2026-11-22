@@ -89,7 +89,10 @@ def test_the_list_shows_each_run_in_its_reports_words_newest_first_and_starts_no
     assert page.index("Run 2") < page.index("Run 1")
     assert "Sending the verdicts" in page and "Stop asked" in page and "s@example.com" in page
     main = page.split("<main>", 1)[1]  # the bar above it has the sign-out form
-    assert "<form" not in main and "instructions" not in main  # nothing to start or stop, no link to the notes
+    assert "<form" not in main  # nothing to start or stop
+    assert '<a class="btn" href="/secops/instructions/">Triage notes</a>' in main  # the admin's way to the notes
+    operator = person(w.settings, "o@example.com", {"operator"})
+    assert "/secops/instructions/" not in operator.get("/secops/").text  # admins edit them, nobody else
 
 
 def test_with_no_runs_the_list_says_so_and_why_none_would_start(w):

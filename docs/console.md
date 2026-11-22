@@ -227,7 +227,9 @@ the first scenario's), which nobody else can open, since the file holds the test
 a history of its own. The editor saves atomically and keeps the file's mode. A save over a
 version that changed meanwhile (another person, an edit over SSH) is refused with the difference shown. Every
 saved version is kept with who saved it and can be opened again in the editor. The page also says what the agent
-would get: an instructions file that is empty without its comments, or too large, would stop a run at once.
+would get: an instructions file that is empty without its comments, or too large, would stop a run at once. The list
+of scenarios says so too, on the scenario's row, to everyone who sees it, as it says when the file was changed on the
+server since the last save here; a file in order adds nothing to the row. The row names the problem, never the text.
 
 ## Architecture
 
@@ -242,7 +244,8 @@ is refused. The finding shows who decided, when and why, and **Decisions on it**
 The form carries the version of the finding the page showed. If someone else decided in the meantime, the second
 decision is refused and the page says what stands now. The next review gets the reason only after the security
 screen cleared it, quoted as data ([architect.md](architect.md)). Architects also start and stop a review and edit
-the review instructions, the same way as test runs.
+the review instructions (**Review instructions**, `/architecture/instructions/`), the same way as test runs. When the
+file would stop a review, or was changed on the server since the last save here, the list says so above the reviews.
 
 ## Advisory triage
 
@@ -255,30 +258,38 @@ links into the code at the commit read, and whether each went to the register. T
 false or the runner's mode starts nothing.
 
 It is for reading only. A run is started with `arceus-runner secops run` or by `secops.schedule` and stopped with
-`secops stop`, on the server. The team's notes on its stack are edited under **Instructions**.
+`secops stop`, on the server. Admins edit the team's notes on its stack under **Triage notes** on the list
+(`/secops/instructions/`), in the same editor as the project's notes (below), and a save leads back to the list; the
+list says above the runs when the file would stop a run or was changed on the server.
 
-## Instructions
+## Project notes
 
-**Instructions** lists every text the agents are given besides the runner's own rules: the project's notes, each test
-scenario's instructions, the architecture review's, the advisory triage's notes and the server's notes. Each says what
-it is for, who reads it and when, who edits it, its file, and whether the agent can be given what it holds now (its
-bytes against the runner's limit, how many are left, or why not). The list names files and their state, never their
-text: a test scenario's holds the test accounts. QA, architects, operators and admins see it.
+**Settings** opens with the project's notes: what the product is, the team's words, how the repositories fit
+together, the rules the code does not show. Every task's agent reads them in its AGENTS.md. The block shows their file,
+whether the agent can be given what it holds now (its bytes against the runner's limit and how many are left, or why
+not), and whether it was changed on the server since the last save here. It names the state, never the text.
+Operators and admins see it; admins edit the notes under **Edit** (`/settings/project-notes/`), and a save leads back
+to it with what the save changed for the next task. A note under it says where the server's notes come from (below).
 
-The project's notes (`/instructions/project-notes/`) and the advisory triage's notes (`/instructions/secops/`) are
-edited here by admins, in the same editor as the test and review instructions (whose own pages the list links to): a
-save over a version that changed meanwhile is refused with the difference, every saved version is kept with who saved
-it and opens again as a draft. Every editor checks the text by its reader's own rules before it writes: the project's
-notes by `texts.project_notes` (16 KB without comments), the instructions by `read_instructions` (64 KB; required for
-a test scenario). A text the runner would refuse is not saved, so a save from the console never stops the next task or
-run; the person's text stays in the editor with the reason. A task reads the project's notes when it first starts and
-keeps its copy, so a save reaches the next task and leaves the ones under way alone. With `paths.project_notes` not set
-there is nothing to edit, and the page says how to set it.
+The editor is the same one as the test and review instructions': a save over a version that changed meanwhile is
+refused with the difference, every saved version is kept with who saved it and opens again as a draft. Every editor
+checks the text by its reader's own rules before it writes: the project's notes by `texts.project_notes` (16 KB
+without comments), the instructions by `read_instructions` (64 KB; required for a test scenario). A text the runner
+would refuse is not saved, so a save from the console never stops the next task or run; the person's text stays in the
+editor with the reason. A task reads the project's notes when it first starts and keeps its copy, so a save reaches
+the next task and leaves the ones under way alone. With `paths.project_notes` not set there is nothing to edit: the
+block says so, and the editor's page says how to set it.
+
+The texts each process gives its agent are edited on its own page: a test scenario's instructions on **Test runs**,
+the review instructions on **Architecture**, the triage notes on **Advisory triage**. The earlier addresses
+`/instructions/project-notes/` and `/instructions/secops/` lead to the new ones and keep a version's link; a form
+opened there before still saves, since the redirect keeps the method and the text. `/instructions/` leads to the
+project's notes in Settings, or home for whoever does not see Settings.
 
 The console keeps no copy of its own: it edits the file the runner reads, so the file stays the one source. A change
 made on the server (over SSH, a copy put in place) is what the next task gets and what the editor opens. When the
-file is no longer the text last saved here, the editor and the list say so, with the difference; the next save keeps
-that text in the history as the one it replaced. Edits on the server between two saves here are not each kept, and a
+file is no longer the text last saved here, the editor says so with the difference, and the page that leads to it
+says so too; the next save keeps that text in the history as the one it replaced. Edits on the server between two saves here are not each kept, and a
 write on the server in the instant of a save here is not detected: edit in one place at a time. A file the editor
 cannot hold (a symbolic link, over 1 MB) is judged as the runner reads it and edited on the server; a file whose
 folder the console cannot write says so before anything is typed.
@@ -286,7 +297,7 @@ folder the console cannot write says so before anything is typed.
 Each version opens again as a draft, and so does the text it replaced: the file before the first save here, or an
 edit made on the server between two saves.
 
-The server's notes (`config/agent-notes.md`) are shown, never edited: `setup.sh --phase agent_notes` puts them in
+The server's notes (`config/agent-notes.md`) are named under the project's notes, never edited: `setup.sh --phase agent_notes` puts them in
 every Claude Code session on the server, so a change goes through Arceus' own review. A file outside the data folder
 is seen read-only (setup.sh mounts its folder for the console): keep the edited ones in the data folder, as the
 defaults do.

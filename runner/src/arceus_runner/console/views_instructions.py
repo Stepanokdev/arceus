@@ -1,26 +1,25 @@
-"""Every text the agents are given, in one place: what each is for, who reads it and when, who may edit it, and whether
-the agent can be given what it holds now. The project's notes and the advisory triage's notes are edited here; the
-test and review instructions keep their own pages, linked from the list. The server's notes are shown, never edited:
-setup.sh puts them in place for every session on the server. The list names files and their state, never their text
-(a test scenario's holds the test accounts)."""
+"""The editors of the project's notes (opened from the top of Settings) and of the advisory triage's notes (from
+Advisory triage), each checked by the runner's own rules before it is saved, and the check every text the agents are
+given goes through before it is shown: whether the agent can be given what the file holds now. A run's instructions
+are judged here for the warning on its process's page; the page names the problem, never the file's text (a test
+scenario's holds the test accounts)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 
 from arceus_runner.console import files, runs
 from arceus_runner.console.store import ConsoleError
 from arceus_runner.console.web import Ctx, message, page
-from arceus_runner.db import ReviewStore
-from arceus_runner.qa_scenarios import file_of, history_kind
 from arceus_runner.texts import PROJECT_NOTES_LIMIT, ProjectNotesError, project_notes, project_notes_text
 from arceus_runner.workspace_run import MAX_INSTRUCTIONS, read_instructions
 
-SECTIONS = ("/instructions/",)
+NOTES_PATH = "/settings/project-notes/"
+SECOPS_PATH = "/secops/instructions/"
 
 NOTES_READS = ("A task reads them when it first starts and keeps its copy: its follow-ups, a /continue and its code "
                "review keep the version it started with. Tasks under way are not changed.")
@@ -29,12 +28,9 @@ SECOPS_READS = "A triage run reads them when it starts and keeps a copy: a run u
 
 @dataclass
 class Row:
-    title: str
-    what: str            # what it is for, in a line
-    reader: str          # who reads it and when
-    editors: str         # who may edit it
-    href: str = ""       # its editor, or "" when it is not edited here
-    path: Path | None = None
+    path: Path | None
+    what: str = ""       # what it is for, in a line
+    reader: str = ""     # who reads it and when
     state: str = ""      # good / bad / unknown, for the line under it
     said: str = ""       # that line
     outside: dict | None = None  # the last save here, when the file was changed on the server since
@@ -66,7 +62,7 @@ def notes_check(path: Path):
 
 
 def _judge(ctx: Ctx, row: Row, kind: str, reader, limit: int, required: bool) -> Row:
-    """The lines under a file in the list: whether the agent can be given it as the runner reads it and how much of
+    """The line about a file: whether the agent can be given it as the runner reads it and how much of
     the limit it takes, and whether it was changed on the server since the last save here."""
     gets, why = reader()
     if gets is None:
@@ -81,61 +77,26 @@ def _judge(ctx: Ctx, row: Row, kind: str, reader, limit: int, required: bool) ->
     return row
 
 
-def _scenarios(cfg) -> list:
-    try:
-        store = ReviewStore.read_only(cfg.paths.db)
-    except (FileNotFoundError, RuntimeError):
-        return []
-    try:
-        return store.scenarios()
-    finally:
-        store.close()
-
-
-def rows(ctx: Ctx) -> list[Row]:
-    cfg = _cfg(ctx)
+def notes_row(ctx: Ctx, cfg) -> Row:
+    """The project's notes as the top of Settings shows them: whether every task's agent can be given what the file
+    holds now, how much of the limit it takes, and whether it was changed on the server since the last save here."""
     notes = cfg.paths.project_notes
-    row = Row("Project notes", "What the product is, the team's words, how the repositories fit together, the rules "
-              "the code does not show.", "Every task's agent, in AGENTS.md, when the task starts.", "Admins",
-              "/instructions/project-notes/", notes)
+    row = Row(notes, "What the product is, the team's words, how the repositories fit together, the rules the code "
+              "does not show.", "Every task's agent reads them in AGENTS.md when the task first starts; tasks under "
+              "way keep the version they started with.")
     if notes is None:
         row.state, row.said = "unknown", "paths.project_notes is not set in config.yaml: tasks get no notes"
-    else:
-        _judge(ctx, row, "project_notes", notes_reader(notes), PROJECT_NOTES_LIMIT, required=False)
-    out = [row]
-    for sc in _scenarios(cfg):
-        path = file_of(cfg.qa, sc)
-        out.append(_judge(ctx, Row(f"Test scenario: {sc.name}", "The platform's address, its test accounts and what "
-                                   "to test.", "A test run of this scenario, when it starts.", "QA, admins",
-                                   f"/qa/scenarios/{sc.n}/instructions/", path),
-                          history_kind(sc), lambda p=path: read_instructions(p), MAX_INSTRUCTIONS, required=True))
-    path = cfg.architect.instructions
-    out.append(_judge(ctx, Row("Architecture review", "What to look at harder, what to leave alone, the rules to hold "
-                               "the code to.", "An architecture review, when it starts. Optional.",
-                               "Architects, admins", "/architecture/instructions/", path),
-                      "arch.instructions", lambda: read_instructions(path, False), MAX_INSTRUCTIONS, required=False))
-    secops = cfg.secops.instructions
-    out.append(_judge(ctx, Row("Advisory triage", "What is deployed where, which repositories are legacy, what the "
-                               "advisories should be weighed against.", "A triage run, when it starts. Optional.",
-                               "Admins", "/instructions/secops/", secops),
-                      "secops.instructions", lambda: read_instructions(secops, False), MAX_INSTRUCTIONS,
-                      required=False))
-    out.append(Row("Server notes", "When to ask on the ticket, how to write the run summary, checks, proof, leaving "
-                   "nothing behind. The same for every project on the server.",
-                   "Every Claude Code session on the server, from the run user's ~/.claude/CLAUDE.md.",
-                   "Arceus' maintainers: config/agent-notes.md in its repository, put in place by "
-                   "setup.sh --phase agent_notes", state="unknown",
-                   said="Not edited here: a change reaches every session at once, so it goes through Arceus' review"))
-    return out
+        return row
+    return _judge(ctx, row, "project_notes", notes_reader(notes), PROJECT_NOTES_LIMIT, required=False)
 
 
-def index(ctx: Ctx) -> Response:
-    ctx.require("instructions.view")
-    try:
-        listed, error = rows(ctx), ""
-    except ConsoleError as e:
-        listed, error = [], str(e)
-    return ctx.render("instructions.html", title="Instructions", rows=listed, error=error)
+def warning(ctx: Ctx, kind: str, path: Path, required: bool) -> Row | None:
+    """A run's instructions file judged as its run reads it, only when something is wrong: the run would stop on it
+    (required and empty, too large, unreadable) or it was changed on the server since the last save here. Shown on
+    the row or the header of its process, so the problem is seen before a run starts. A file in order says nothing."""
+    row = _judge(ctx, Row(path), kind, lambda: read_instructions(path, required),
+                 MAX_INSTRUCTIONS, required)
+    return row if row.state == "bad" or row.outside else None
 
 
 def notes_page(ctx: Ctx) -> Response:
@@ -148,13 +109,14 @@ def notes_page(ctx: Ctx) -> Response:
                        "and there is no file to edit. On the server, add `project_notes: "
                        "~/arceus/data/project-notes.md` under `paths:` in config.yaml, then run `sudo ./setup.sh` "
                        "(it creates the file from the template) and restart the runner. Settings shows paths but "
-                       "does not change them.", back="/instructions/")
+                       "does not change them.", back="/settings/")
     return runs.file_page(
         ctx, kind="project_notes", action="notes.edit", path=path, title="Project notes",
         lede="The project's own rules for the agent: what the product is, the team's words, how the repositories fit "
-             "together, decisions already made. Added to every task's AGENTS.md below the server's notes, which win "
-             "where the two disagree.",
-        back=("/instructions/", "Instructions"), required=False, limit=PROJECT_NOTES_LIMIT, reads=NOTES_READS,
+             "together, decisions already made. Added to every task's AGENTS.md under Project notes. The server's notes, "
+             "which every session reads from the run user's ~/.claude/CLAUDE.md, win where the two disagree.",
+        back=("/settings/", "Settings"), saved_to="/settings/", required=False,
+        limit=PROJECT_NOTES_LIMIT, reads=NOTES_READS,
         reader=notes_reader(path), check=notes_check(path))
 
 
@@ -166,10 +128,29 @@ def secops_page(ctx: Ctx) -> Response:
         title="Advisory triage notes",
         lede="The team's notes on its stack for the triage of security advisories: what is deployed where, which "
              "repositories are legacy, what to weigh an advisory against. Optional: the triage stands without them.",
-        back=("/instructions/", "Instructions"), required=False, reads=SECOPS_READS)
+        back=("/secops/", "Advisory triage"), saved_to="/secops/", required=False, reads=SECOPS_READS)
+
+
+def _moved(to: str):
+    """An address the editors had before they moved to their own sections. 307 keeps the method and the body, so a
+    form opened at the old address still saves; a link to a version keeps its query."""
+    def handler(ctx: Ctx) -> Response:
+        query = ctx.request.url.query
+        return RedirectResponse(to + (f"?{query}" if query else ""), status_code=307)
+    return handler
+
+
+def _old_list(ctx: Ctx) -> Response:
+    """The list of every text the agents are given, which this address had: the project's notes are at the top of
+    Settings now, every other text on the page of its own process."""
+    return ctx.redirect("/settings/#project-notes" if ctx.can("settings.view") else "/")
 
 
 def routes() -> list[Route]:
-    return [Route("/instructions/", page(index)),
-            Route("/instructions/project-notes/", page(notes_page), methods=["GET", "POST"]),
-            Route("/instructions/secops/", page(secops_page), methods=["GET", "POST"])]
+    # Registered before views_secops and views_settings (web.create_app), whose /secops/{n}/ and /settings/{name}/
+    # would take these addresses.
+    return [Route(NOTES_PATH, page(notes_page), methods=["GET", "POST"]),
+            Route(SECOPS_PATH, page(secops_page), methods=["GET", "POST"]),
+            Route("/instructions/", page(_old_list)),
+            Route("/instructions/project-notes/", page(_moved(NOTES_PATH)), methods=["GET", "POST"]),
+            Route("/instructions/secops/", page(_moved(SECOPS_PATH)), methods=["GET", "POST"])]

@@ -95,11 +95,12 @@ Verdict = tuple[str | None, str]  # what the agent gets, or None and why it cann
 
 
 def file_page(ctx: Ctx, *, kind: str, action: str, path: Path, title: str, lede: str, back: tuple[str, str],
-              required: bool, sensitive: bool = False, limit: int = MAX_INSTRUCTIONS, reads: str = "",
-              reader: Callable[[], Verdict] | None = None, check: Callable[[str], Verdict] | None = None) -> Response:
+              required: bool, saved_to: str = "", sensitive: bool = False, limit: int = MAX_INSTRUCTIONS,
+              reads: str = "", reader: Callable[[], Verdict] | None = None, check: Callable[[str], Verdict] | None = None) -> Response:
     """The page that shows and edits one of the factory's text files, for the people `action` allows. The file is
     judged as its runner reads it (`reader`), a draft by the same rule (`check`): a draft it refuses is never written,
-    so the console cannot save what would stop the next run."""
+    so the console cannot save what would stop the next run. A save leads with its notice to `saved_to`, or back to
+    the editor when there is none."""
     if not ctx.can(action):
         raise Denied(action)
     user = ctx.user
@@ -119,8 +120,8 @@ def file_page(ctx: Ctx, *, kind: str, action: str, path: Path, title: str, lede:
             if agent_gets is None:
                 error = f"Not saved: {why}. Your text is still in the editor."
             elif files.save(ctx.store, kind, path, text, sha, user, ctx.field("note")):
-                return ctx.redirect(ctx.path,
-                                    "Saved. " + (reads or "A run that starts from now on reads this version."))
+                said = "Saved. " + (reads or "A run that starts from now on reads this version.")
+                return ctx.redirect(saved_to or ctx.path, said)
             else:
                 notice = "Nothing changed: the file is already this text."
         except files.Conflict as c:

@@ -225,8 +225,7 @@ def same_origin(request: Request, settings: Settings) -> bool:
 
 # The bar at the top: address, words, who sees it. Only the sections this console serves are shown.
 SECTIONS = [("/", "Home", "view"), ("/tasks/", "Tasks", "view"), ("/qa/", "Test runs", "view"), ("/architecture/", "Architecture", "view"),
-            ("/secops/", "Advisory triage", "view"), ("/instructions/", "Instructions", "instructions.view"),
-            ("/grafana/", "Monitoring", "view"),
+            ("/secops/", "Advisory triage", "view"), ("/grafana/", "Monitoring", "view"),
             ("/settings/", "Settings", "settings.view"), ("/operations/", "Operations", "ops.view"),
             ("/users/", "People", "users.manage")]
 
@@ -381,7 +380,9 @@ def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or Settings.from_env()
     console = ConsoleApp(settings)
     routes = [Route("/static/{name}", static), Route("/healthz", healthz)]
-    for module in (views_auth, views_home, views_tasks, views_qa, views_arch, views_secops, views_instructions,
+    # views_instructions before views_secops and views_settings: /secops/{n}/ and /settings/{name}/ would take its
+    # /secops/instructions/ and /settings/project-notes/.
+    for module in (views_auth, views_home, views_tasks, views_qa, views_arch, views_instructions, views_secops,
                    views_assistant, views_settings, views_ops, views_users):
         routes += module.routes()
         console.sections.update(getattr(module, "SECTIONS", ()))

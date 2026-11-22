@@ -26,7 +26,6 @@ ACTIONS: dict[str, frozenset[str]] = {
     "settings.edit": frozenset(),
     "notes.edit": frozenset(),
     "secops.instructions": frozenset(),
-    "instructions.view": frozenset({"qa", "architect", "operator"}),
     "ops.view": frozenset({"operator"}),
     "ops.restart": frozenset({"operator"}),
     "ops.check": frozenset({"operator"}),
