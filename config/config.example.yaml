@@ -109,7 +109,7 @@ limits:
   max_review_answers: 20        # review rounds answered without a change
   max_ci_fix_attempts: 3
   needs_input_reminder: 24h
-  needs_input_fail_after: 5d
+  needs_input_fail_after: 5d           # not for the agent's conclusion that nothing needs changing: no deadline
   attempt_timeout: 8h                  # no verdict this long: fails as "agent hung"
   agent_quiet_after: 20m               # agent silent this long: agent_quiet
   continue_window: 14d                 # `/continue` resumes a failed task within this

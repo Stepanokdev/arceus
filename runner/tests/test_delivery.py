@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from arceus_runner import loop
+from arceus_runner.delivery import GATE_STOPPED
 from arceus_runner.config import Config
 from arceus_runner.texts import PROJECT_NOTES_LIMIT, ProjectNotesError, project_notes
 from arceus_runner.db import ReviewStore as TaskStore
@@ -69,13 +70,15 @@ class World:
     def __init__(self, tmp: Path, secrets, engine_dir: Path | None = None, engine_env: dict | None = None,
                  settings: dict | None = None):
         self.tmp = tmp
-        # The engine's tmux server is the fake engine's too (fake_engine.tmux): no test ever asks a real tmux.
-        fakebin = tmp / "fakebin"
-        fakebin.mkdir(parents=True, exist_ok=True)
-        (fakebin / "tmux").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_ENGINE}" tmux "$@"\n')
-        (fakebin / "tmux").chmod(0o755)
-        self.engine_env = {"PATH": f"{fakebin}:/usr/local/bin:/usr/bin:/bin", **(engine_env or {})}
+        self.engine_env = dict(engine_env or {})
         if engine_dir is None:
+            # The fake engine's tmux server is its own too (fake_engine.tmux): such a test never asks a real tmux.
+            # The real engine (test_real_engine.py) starts its workers in a real one.
+            fakebin = tmp / "fakebin"
+            fakebin.mkdir(parents=True, exist_ok=True)
+            (fakebin / "tmux").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_ENGINE}" tmux "$@"\n')
+            (fakebin / "tmux").chmod(0o755)
+            self.engine_env = {"PATH": f"{fakebin}:/usr/local/bin:/usr/bin:/bin", **self.engine_env}
             engine_dir = tmp / "engine"
             (engine_dir / "bin").mkdir(parents=True)
             for script, cmd in (("dispatch.sh", "dispatch"), ("worker-send.sh", "worker-send"),
@@ -343,7 +346,9 @@ def test_an_empty_diff_without_any_passing_review_stays_debt(w):
     take(w)
     passed_earlier(w, w.agent_commits(), None)
     w.tick()
-    assert w.gl.mrs == [] and w.store.task("ACME-1").state == "failed"
+    task = w.store.task("ACME-1")
+    assert w.gl.mrs == [] and task.state == "failed" and "agent-failed" in w.yt.issue_tags["2-1"]
+    assert "commits it made earlier were never reviewed" in task.reason   # not a no-change question: work is there
 
 
 def passed_without_outcome(w: World, sha: str, passed: str | None) -> None:
@@ -1224,6 +1229,46 @@ def test_debt_from_a_failed_verifier_check_names_the_check_and_its_cause(w):
     assert w.gl.mrs == []
 
 
+def test_what_a_failed_check_printed_never_reaches_the_ticket_when_the_gate_stops_the_work(w):
+    """The gate's own stop on failed checks names each check on the ticket by a neutral label and its exit code:
+    its name (written by the agent or the project), command, note and log go only to the local event log."""
+    _review_stopped(w, "")
+    w.set_engine(lambda s: s["tasks"]["ACME-1"]["receipt"].update(review_why="[VERIFIER OVERRIDE] failed"))
+    _verifier_evidence(w, "run-9", [
+        {"criterion": "GET https://ci.internal.example/api with key sk-live-LEAKME answers", "status": "fail",
+         "exit_code": 7, "command": "curl -H 'PRIVATE-TOKEN: glpat-LEAKME' https://ci.internal.example/api",
+         "note": "401 with glpat-LEAKME from ci.internal.example", "artifact": "x/api.log"},
+        {"status": "fail", "exit_code": 2, "command": "deploy --password=hunter2-LEAKME"},
+    ], {"api.log": "error: token glpat-LEAKME rejected by ci.internal.example\n"})
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "failed" and task.reason.startswith("the project's automated checks kept failing")
+    text = "\n".join(w.bot_comments())
+    assert "- check 1 failed (exit 7)" in text and "- check 2 failed (exit 2)" in text
+    assert "LEAKME" not in text and "internal.example" not in text and "curl" not in text and "GET" not in text
+    first, second = w.events_named("verifier_gap")
+    assert (first["check"], first["status"], first["exit_code"], first["run_id"], second["check"]) == \
+        (1, "fail", 7, "run-9", 2)
+    stream = w.cfg.paths.events.read_text()                      # what Alloy ships to Loki, line for line
+    assert "LEAKME" not in stream and "internal.example" not in stream and "hunter2" not in stream
+
+
+def test_a_cause_from_a_check_s_log_has_the_runner_s_tokens_taken_out_and_never_shows_the_command(w):
+    take(w)
+    w.agent_commits()
+    w.settle("ACME-1", "failed", review="debt", state_reason="debt", outcome={"result": "succeeded_changes"})
+    w.set_engine(lambda s: s["tasks"]["ACME-1"]["receipt"].update(
+        run_id="run-6", review_why="STATE: COMPLETE\nVERDICT: PASS\n\n[VERIFIER OVERRIDE] failed"))
+    _verifier_evidence(w, "run-6", [
+        {"status": "fail", "exit_code": 1, "command": f"git push https://bot:{GL_TOKEN}@gitlab/x.git",
+         "artifact": "push.log"},
+    ], {"push.log": f"fatal: Authentication failed for https://bot:{GL_TOKEN}@gitlab/x.git\n"})
+    w.tick()
+    [note] = [t for t in w.bot_comments() if "The change passed review" in t]
+    assert "- check 1 failed (exit 1): fatal: Authentication failed" in note
+    assert GL_TOKEN not in note and "git push" not in note
+
+
 def test_debt_from_an_inconclusive_verifier_says_inconclusive(w):
     take(w)
     w.agent_commits()
@@ -1487,7 +1532,7 @@ def test_the_engine_never_gets_claude_check_settings_not_even_from_bulava_env(w)
 
 def test_a_check_failure_from_an_older_engine_still_fails_the_task(w):
     """A task started on 1.19.1 can still end with its gate's "independent check failed". That path is
-    gone from the runner: it reads as a person's decision, never as a pass, and nothing is published."""
+    gone from the runner: it reads as a stop of the review, never as a pass, and nothing is published."""
     take(w)
     w.agent_commits()
     w.settle("ACME-1", "failed", review="failed", state_reason="needs-user")
@@ -1495,7 +1540,7 @@ def test_a_check_failure_from_an_older_engine_still_fails_the_task(w):
         review_why="independent check failed (security) and SUPERVISOR_CLAUDE_CHECKS_REQUIRED=1"))
     w.tick()
     task = w.store.task("ACME-1")
-    assert task.state == "failed" and task.reason == "the review asked for a person's decision"
+    assert task.state == "failed" and task.reason == GATE_STOPPED
     assert w.remote_branch("agent/ACME-1-fix-login-page") is None and w.gl.mrs == []
     assert not [e for e in read_events(w.cfg.paths.events) if e["event"] == "required_check_missed"]
 
@@ -1567,8 +1612,172 @@ def test_a_park_for_a_person_that_is_not_the_review_s_block_stays_a_failure(w):
     _review_stopped(w, TEAM_BLOCKED + "\n## 2026-11-16 18:00:00 — session s-2\nReviewer unreachable 5 times.\n")
     w.tick()
     task = w.store.task("ACME-1")
-    assert task.state == "failed" and task.reason == "the review asked for a person's decision"
+    assert task.state == "failed" and task.reason == GATE_STOPPED
     assert "agent-failed" in w.yt.issue_tags["2-1"] and "agent-needs-input" not in w.yt.issue_tags["2-1"]
+
+
+STALLED = """
+## 2026-11-22 20:31:15 — session s-1 (stalled: 5 findings, no progress for 2 rounds)
+STATE: COMPLETE
+"""
+STALLED_WHY = """STATE: COMPLETE
+VERDICT: FAIL
+1. [acceptance_failure] health.txt: no version in the answer [repeat]
+
+STILL OPEN FROM THE REVIEW (not confirmed fixed; ids are stable):
+T1: [acceptance_failure] health.txt: no version in the answer
+T2: [acceptance_failure] Codex: the test does not check the status code
+2. [related_improvement] the README could mention the endpoint
+3. [pre_existing] the logger is noisy
+4. [harness_failure] the verifier could not start node"""
+
+
+@pytest.mark.parametrize("review_why,note,reason,shown,hidden", [
+    ("reviewer unreachable 5x: рецензент (codex) зупинився з кодом 1 at /home/arceus/.codex", "",
+     "the reviewer (Codex) could not be reached, so the work was not reviewed", [], ["зупинився", "/home/arceus"]),
+    ("uncommitted work after 3 requests to commit it: /srv/ws/acme-platform /srv/ws/acme-theme", "",
+     "the agent left work uncommitted after being asked to commit it",
+     ["Left uncommitted in: acme-platform, acme-theme."], ["/srv/ws"]),
+    ("worker declared: failed", "", "the agent reported that it could not finish the task", [], []),
+    (STALLED_WHY, STALLED, "the review kept finding the same problems, with no progress between rounds",
+     ["- health.txt: no version in the answer", "- the test does not check the status code"],
+     ["[repeat]", "T1:", "VERDICT", "Codex:", "README", "logger", "verifier could not start"]),
+    (STALLED_WHY, "", "the review still found problems when its rounds ran out",   # the hard limit: no stalled note
+     ["The review's findings still open:", "- health.txt: no version in the answer"], ["README", "T2:"]),
+    ("declared 'succeeded_no_change' 3 times while the diff against base is non-empty", "", GATE_STOPPED, [],
+     ["declared"]),
+])
+def test_each_stop_of_the_review_gate_says_what_it_was(w, review_why, note, reason, shown, hidden):
+    """`needs-user` is many different stops of Bulava's gate; the ticket names the one the receipt names, with only
+    what the runner picked out of `review_why` (tests/test_real_gate.py runs the same stops through the real gate)."""
+    _review_stopped(w, note)
+    w.set_engine(lambda s: s["tasks"]["ACME-1"]["receipt"].update(review_why=review_why))
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "failed" and task.reason == reason
+    text = "\n".join(w.bot_comments())
+    assert f"could not take this ticket to a merge request: {reason}." in text
+    assert "Docs closed to everyone but a superuser." in text
+    assert all(x in text for x in shown), text
+    assert not any(x in text for x in hidden), text
+    assert "agent-failed" in w.yt.issue_tags["2-1"] and w.gl.mrs == []
+
+
+def test_a_blocker_the_agent_filed_is_a_question_not_a_failure(w):
+    """Bulava parks an attempt whose agent filed a `blocker` finding as `needs-user`; the agent waits for a person."""
+    _review_stopped(w, "")
+    w.set_engine(lambda s: s["tasks"]["ACME-1"]["receipt"].update(
+        review_why="worker blocker finding: need the CI job's checkout SHA or a re-run of pipeline 900"))
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "needs_input" and "agent-needs-input" in w.yt.issue_tags["2-1"]
+    [q] = [t for t in w.bot_comments() if "[arceus:question:" in t]
+    assert "**What it needs:**" in q and "- need the CI job's checkout SHA or a re-run of pipeline 900" in q
+    assert "could not take this ticket" not in "\n".join(w.bot_comments()) and w.gl.mrs == []
+    w.yt.comment("2-1", "a.smith", "Re-run it, the runner cache was stale.")
+    w.tick()
+    [send] = w.calls("worker-send")
+    assert send["argv"][-1].endswith("the runner cache was stale.") and w.store.task("ACME-1").state == "dispatched"
+
+
+def _no_change(w, summary: str = "The endpoint already exists.") -> None:
+    """The agent's first attempt changed nothing and said so: the engine banks it unreviewed, as debt."""
+    take(w)
+    w.settle("ACME-1", "failed", review="debt", state_reason="debt",
+             outcome={"result": "succeeded_no_change", "summary": summary})
+    w.set_engine(lambda s: s["tasks"]["ACME-1"]["receipt"].update(review_why=EMPTY_DIFF_WHY,
+                                                                   codex={"status": "unreviewed"}))
+    w.tick()
+
+
+def test_no_code_change_on_a_new_ticket_is_a_decision_for_a_person_not_a_failure(w):
+    _no_change(w)
+    task = w.store.task("ACME-1")
+    assert task.state == "needs_input" and task.no_change_asked
+    tags = w.yt.issue_tags["2-1"]
+    assert "agent-needs-input" in tags and "agent-failed" not in tags
+    [q] = [t for t in w.bot_comments() if "[arceus:question:1]" in t]
+    assert "found nothing to change" in q and "The endpoint already exists." in q
+    assert "close the ticket (any state the project counts as resolved)" in q and "reply with a comment saying what" in q
+    assert "move it out of" not in q
+    assert "could not take this ticket" not in "\n".join(w.bot_comments()) and w.gl.mrs == []
+    [e] = w.events_named("task_needs_input")
+    assert e.get("no_change") is True
+
+
+def test_a_tracker_failure_after_the_no_change_question_never_posts_it_twice(w):
+    take(w)
+    w.settle("ACME-1", "failed", review="debt", state_reason="debt",
+             outcome={"result": "succeeded_no_change", "summary": "The endpoint already exists."})
+    w.set_engine(lambda s: s["tasks"]["ACME-1"]["receipt"].update(review_why=EMPTY_DIFF_WHY,
+                                                                   codex={"status": "unreviewed"}))
+    w.yt.fail_once[("POST", "/api/issues/2-1/tags")] = 503        # the question is posted, the tag is not
+    w.tick()
+    assert w.store.task("ACME-1").state == "dispatched"
+    w.tick()
+    assert w.store.task("ACME-1").state == "needs_input" and "agent-needs-input" in w.yt.issue_tags["2-1"]
+    assert len([t for t in w.bot_comments() if "[arceus:question:1]" in t]) == 1
+
+
+def test_closing_the_ticket_accepts_the_no_change_conclusion_and_ends_the_task_as_done(w):
+    _no_change(w)
+    w.yt.issue_fields["2-1"]["State"] = {"name": "Done"}                         # resolved, as the tracker says
+    w.yt.fail_once[("DELETE", "/api/issues/2-1/tags/t-agent-needs-input")] = 503   # the tracker blinks
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "done" and task.reason == 'no code changes: a person closed the ticket ("Done")'
+    assert "agent-needs-input" in w.yt.issue_tags["2-1"]                          # left to the journal
+    w.tick()
+    assert "agent-needs-input" not in w.yt.issue_tags["2-1"] and "agent-failed" not in w.yt.issue_tags["2-1"]
+    w.yt.comment("2-1", "j.doe", "thanks")
+    w.tick()
+    assert w.calls("worker-send") == [] and w.store.task("ACME-1").state == "done"
+
+
+@pytest.mark.parametrize("state", ["Code Review", "Blocked", None])
+def test_a_ticket_moved_to_an_open_state_or_with_no_state_keeps_waiting_and_a_reply_still_counts(w, state):
+    """Only a ticket the tracker counts as resolved accepts the conclusion: another open state (even one the runner
+    does not know) or no state at all is not an answer, and the person can still reply."""
+    _no_change(w)
+    if "Blocked" == state:
+        w.yt.states.append("Blocked")
+    w.yt.issue_fields["2-1"]["State"] = {"name": state} if state else None
+    w.tick()
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "needs_input" and "agent-needs-input" in w.yt.issue_tags["2-1"]
+    w.yt.comment("2-1", "j.doe", "It must also report the DB status.")
+    w.tick()
+    [send] = w.calls("worker-send")
+    assert send["argv"][-1].endswith("must also report the DB status.")
+    assert w.store.task("ACME-1").state == "dispatched"
+
+
+def test_a_no_change_conclusion_waits_past_the_answer_deadline_and_a_reply_takes_the_work_on(w):
+    _no_change(w)
+    w.now = NOW + timedelta(days=30)
+    w.tick()
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "needs_input" and "agent-failed" not in w.yt.issue_tags["2-1"]
+    [reminder] = [t for t in w.bot_comments() if "[arceus:reminder:" in t]
+    assert "close the ticket if you agree" in reminder and "fail" not in reminder
+    w.yt.comment("2-1", "j.doe", "It exists, but it must also report the DB status.")
+    w.tick()
+    [send] = w.calls("worker-send")
+    assert send["argv"][-1].endswith("must also report the DB status.")
+    assert w.store.task("ACME-1").state == "dispatched"
+    w.tick()
+    assert "agent-needs-input" not in w.yt.issue_tags["2-1"]
+
+
+def test_an_ordinary_question_keeps_its_deadline(w):
+    """Only the no-change conclusion waits without a deadline; the agent's own question still fails unanswered."""
+    _ask(w)
+    assert not w.store.task("ACME-1").no_change_asked
+    w.now = NOW + timedelta(days=6)
+    w.tick()
+    assert w.store.task("ACME-1").state == "failed"
 
 
 def test_an_earlier_attempt_s_block_never_stands_for_this_one(w):
@@ -1600,7 +1809,7 @@ def test_a_person_asked_by_codex_is_still_codex_s_decision(w):
     w.agent_commits()
     w.settle("ACME-1", "failed", review="failed", state_reason="needs-user")
     w.tick()
-    assert w.store.task("ACME-1").reason == "the review asked for a person's decision"
+    assert w.store.task("ACME-1").reason == GATE_STOPPED
 
 
 def test_a_model_or_engine_label_at_a_line_start_goes_and_the_same_word_in_the_text_stays():

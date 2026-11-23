@@ -137,6 +137,7 @@ class YouTrackIssue:
     fields: dict[str, list[str]]  # custom field name -> value names (logins for users)
     writers: tuple[str, ...] = ()  # who reported it and who changed it last: the text may be theirs
     parent: str = ""  # the issue this one is a subtask of
+    resolved: bool = False  # YouTrack set `resolved`: the issue is in a state its project marks as resolved
 
 
 def _value_names(value: object) -> list[str]:
@@ -162,7 +163,7 @@ class YouTrackWriter(YouTrack):
     def issue(self, issue_id: str) -> YouTrackIssue:
         data = self.c.get_json(
             f"/api/issues/{quote(issue_id)}",
-            {"fields": "id,idReadable,summary,description,reporter(login),updater(login),"
+            {"fields": "id,idReadable,summary,description,resolved,reporter(login),updater(login),"
                        "customFields(name,value(name,login,text)),parent(issues(idReadable))"},
         )
         fields = {f["name"]: _value_names(f.get("value")) for f in data.get("customFields") or [] if f.get("name")}
@@ -170,7 +171,7 @@ class YouTrackWriter(YouTrack):
                                       if isinstance(u, dict) and u.get("login")))
         parents = [i.get("idReadable") for i in (data.get("parent") or {}).get("issues") or [] if i.get("idReadable")]
         return YouTrackIssue(data["id"], data["idReadable"], data.get("summary") or "", data.get("description") or "",
-                             fields, writers, parents[0] if parents else "")
+                             fields, writers, parents[0] if parents else "", data.get("resolved") is not None)
 
     def comments(self, issue_id: str) -> list[Comment]:
         fields = "id,text,created,author(login),deleted"
@@ -293,7 +294,7 @@ class YouTrackTracker:
     def issue(self, key: str) -> IssueDetails:
         i = self.api.issue(key)
         return IssueDetails(i.db_id, i.key, i.summary, i.description, (i.fields.get(self.cfg.state_field) or [""])[0],
-                            i.writers, i.parent)
+                            i.writers, i.parent, i.resolved)
 
     def tags(self, db_id: str) -> set[str]:
         return self.api.issue_tags(db_id)

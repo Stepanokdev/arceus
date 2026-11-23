@@ -86,6 +86,7 @@ class Facts:
     state: str
     kind: str = "code"
     blocked: bool = False            # the question says the agent cannot go on at all without an answer
+    no_change: bool = False          # it waits on the agent's conclusion that nothing needs changing
     turn: str = ""                   # live()["turn"]
     used_up: list[str] = field(default_factory=list)
     holder: str = ""                 # what has the shared workspace now, in words; "" when it is free
@@ -157,6 +158,11 @@ def reason(f: Facts) -> dict:
     if state == "publishing":
         return r("publishing", "busy", "Opening merge requests",
                  "Codex passed the work; the runner pushes exactly that commit and opens the merge requests.")
+    if state == "needs_input" and f.no_change:
+        return r("person", "wait", "Nothing to change: waiting for your decision",
+                 "The agent concluded that nothing needs changing, and no review checks that. Closing the ticket "
+                 "accepts it and ends the task without a failure; a comment saying what still needs doing sends the "
+                 "agent back to work. It has no deadline.")
     if state == "needs_input":
         title = "Waiting for a decision on the ticket" if f.blocked else "Waiting for an answer on the ticket"
         return r("person", "wait", title, "The agent asked the question below. A comment on the ticket from someone "
@@ -258,19 +264,20 @@ def fixes_waiting(store: ReviewStore, task_id: str) -> bool:
 
 
 def question(task) -> dict | None:
-    """The question the task waits on: {text, options, blocked, cut}. None unless it waits on one, and never an earlier
+    """The question the task waits on: {text, options, blocked, no_change, cut}. None unless it waits on one, and never an earlier
     question's words: the record keeps the last question asked, which a later one replaces."""
     if task.state != "needs_input" or not task.question:
         return None
     try:
         q = json.loads(task.question)
     except ValueError:
-        return {"text": "", "options": [], "blocked": False, "cut": False, "unreadable": True}
+        return {"text": "", "options": [], "blocked": False, "no_change": False, "cut": False, "unreadable": True}
     if not isinstance(q, dict) or q.get("id") != task.question_id:
         return None
     text = q.get("text") if isinstance(q.get("text"), str) else ""
     options = [o for o in q.get("options") or [] if isinstance(o, str)] if isinstance(q.get("options"), list) else []
-    return {"text": text, "options": options, "blocked": bool(q.get("blocked")), "unreadable": False,
+    return {"text": text, "options": options, "blocked": bool(q.get("blocked")), "no_change": bool(q.get("no_change")),
+            "unreadable": False,
             # Kept before questions were kept whole: the ticket has the rest.
             "cut": len(text) == OLD_QUESTION_CUT + 1 and text.endswith("…")}
 

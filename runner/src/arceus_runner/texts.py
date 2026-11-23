@@ -278,6 +278,28 @@ def review_stop(note: str) -> str:
     return "\n\n".join(p for p in parts if p).strip()
 
 
+_FINDING = re.compile(r"^\s*(?:\d+[.)]|[A-Z]\d+:)\s+(.*\S)\s*$")
+_FINDING_NOISE = re.compile(r"\s*\[(?:repeat|acceptance_failure|regression_from_patch)\]\s*")
+# What the gate never blocks on (hooks/review-gate.sh): the tool's own failures and remarks outside the task.
+_FINDING_ASIDE = re.compile(r"\[(?:harness_failure|related_improvement|pre_existing)\]")
+
+
+def review_findings(review: str, limit: int = 8) -> list[str]:
+    """The distinct findings in a Codex review as the gate keeps it: its numbered list and the ids still open on the
+    fix check's ledger (`T1: …`). A review team names one defect once per member and the ledger repeats them, so each
+    text counts once; the gate's own tags (`[repeat]`, the blocking classes) are taken off. What does not block (the
+    review tool's own failures, remarks outside the task) is left out, so it never takes a blocking finding's place."""
+    out: list[str] = []
+    for line in review.splitlines():
+        m = _FINDING.match(line)
+        if not m or m.group(1).split()[0] in ("FIXED", "OPEN", "SAME") or _FINDING_ASIDE.search(m.group(1)):
+            continue
+        text = unattributed(_FINDING_NOISE.sub(" ", m.group(1))).strip()
+        if text and text not in out:
+            out.append(text)
+    return out[:limit]
+
+
 def _unpublished(mrs: list[str]) -> str:
     """What is and is not published while the task waits: nothing yet, or, after its MRs were opened, only this
     round's changes, the MRs staying as they were."""
@@ -309,6 +331,24 @@ def stop_question(needs: list[str], report: str, mrs: list[str] = ()) -> str:
     if report.strip():
         out += ["", "**What the agent did:**", "", report.strip()]
     return "\n".join(out)
+
+
+def no_change_question(report: str) -> str:
+    """The question for a ticket the agent answered by changing nothing: its reasons, for a person to accept or not.
+    Nothing reviews such a claim (Bulava banks it as unreviewed), so the ticket waits for a person, not a failure."""
+    out = ["The agent changed no code: it concluded that nothing needs changing for this ticket. No review checks "
+           "a conclusion like that, so it waits for you. Nothing was published."]
+    if report.strip():
+        out += ["", "**Why, in the agent's words:**", "", unattributed(report).strip()]
+    return "\n".join(out)
+
+
+def no_change_foot() -> str:
+    """How to answer a no-change question: the two ways out, so "ok" is never the only thing a person can say."""
+    return ("**If you agree,** close the ticket (any state the project counts as resolved): the task ends there, "
+            "without a failure, and nothing is published.\n"
+            "**If something does need doing,** reply with a comment saying what. The agent continues on the same "
+            "branch, and whatever it changes is reviewed before anything is published.")
 
 
 def comments_section(comments: list[Comment]) -> str:

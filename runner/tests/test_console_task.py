@@ -124,6 +124,19 @@ def test_the_question_shows_whole_escaped_with_its_options_and_a_link_to_answer_
     assert "left" in text_of(html) and "Time to answer" in html  # needs_input_fail_after counted from the question
 
 
+def test_the_agents_no_change_conclusion_shows_how_to_accept_it_and_no_deadline(w):
+    task(w.store, "ACME-7", "needs_input", "Add a health endpoint", question_id=None,
+         question_at_ms=int((time.time() - 9 * 86400) * 1000),
+         question=json.dumps({"id": None, "text": "The agent changed no code: /healthz already exists.",
+                              "options": [], "blocked": False, "review": False, "no_change": True}))
+    html = page(w, "/tasks/ACME-7/")
+    text = text_of(html)
+    assert "The agent found nothing to change" in text and "/healthz already exists." in text
+    assert "Nothing to change: waiting for your decision" in text
+    assert "Close the ticket if you agree" in text
+    assert "no deadline" in text and "the task fails" not in text and "over" not in text.split("Time to answer")[1][:40]
+
+
 def test_a_question_from_before_it_was_kept_whole_says_the_ticket_has_the_rest(w):
     task(w.store, "ACME-7", "needs_input", question_id="q-1", question_at_ms=int(time.time() * 1000),
          question=json.dumps({"id": "q-1", "text": "x" * 1500 + "…", "options": []}))

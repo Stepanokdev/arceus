@@ -20,6 +20,7 @@ class FakeYouTrack:
         self.users = {"j.doe", "a.smith", "mallory"}
         self.tags = {"agent", "agent-needs-input", "agent-failed"}
         self.states = ["To Do", "In Progress", "Code Review", "Done"]
+        self.resolved_states = {"Done"}  # the states the project marks as resolved: YouTrack sets `resolved` in them
         self.issue_tags: dict[str, set[str]] = {}
         self.issue_fields: dict[str, dict[str, object]] = {}
         self.comments: dict[str, list[dict]] = {}
@@ -61,7 +62,9 @@ class FakeYouTrack:
             if method == "GET" and not rest:
                 issue = next(i for i in self.issues if i["id"] == db_id)
                 fields = self.issue_fields.setdefault(db_id, {"State": {"name": "To Do"}})
+                state = (fields.get("State") or {}).get("name")
                 return json_response({**issue, "description": issue.get("description", "Task description"),
+                                      "resolved": self.clock if state in self.resolved_states else None,
                                       "customFields": [{"name": k, "value": v} for k, v in fields.items()]})
             if method == "POST" and not rest:
                 for f in json.loads(request.content)["customFields"]:

@@ -902,7 +902,7 @@ class Task:
     review_answers: int = 0  # review rounds answered without a code change
     kind: str = "code"       # code: merge requests; research: an answer on the ticket, nothing published;
                              # review: people's merge requests, which the runner only reviews (code_review.py)
-    question: str | None = None  # JSON {id, text, options, blocked}: the last question the agent asked
+    question: str | None = None  # JSON {id, text, options, blocked[, review, no_change]}: the last question asked
     updated_at: str = ""     # when the record last changed: for a task that is over, when it ended
 
     @property
@@ -912,6 +912,18 @@ class Task:
     @property
     def research(self) -> bool:
         return self.kind == "research"
+
+    @property
+    def no_change_asked(self) -> bool:
+        """It waits on the agent's conclusion that nothing needs changing (Delivery.ask with no_change), which a
+        person accepts by closing the ticket: no deadline, never a failure."""
+        if self.state != "needs_input":
+            return False
+        try:
+            q = json.loads(self.question or "{}")
+        except ValueError:
+            return False
+        return isinstance(q, dict) and bool(q.get("no_change"))
 
     @property
     def people_work(self) -> bool:

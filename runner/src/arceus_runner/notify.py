@@ -853,11 +853,17 @@ class Notifier:
         if q.get("id") != t.question_id:
             q = {}  # an earlier question's words (or a task from before they were kept): the ticket has them
         head = "is blocked and needs a decision" if q.get("blocked") else "needs an answer"
+        if q.get("no_change"):
+            head = "found nothing to change and needs your decision"
         lines = [f"❓ {who}{line} {head}."]
         if q.get("text"):
             lines += ["", "> " + esc(clip(q["text"])).replace("\n", "\n> ")]
         lines += [f"{i}. {esc(clip(o, 200))}" for i, o in enumerate(q.get("options") or [], 1)]
-        lines += ["", f"Answer with a comment on the ticket: {self.issue_url(t.task_id)}"]
+        if q.get("no_change"):
+            lines += ["", f"Close the ticket if you agree, or reply on it with what still needs doing: "
+                          f"{self.issue_url(t.task_id)}"]
+        else:
+            lines += ["", f"Answer with a comment on the ticket: {self.issue_url(t.task_id)}"]
         return "\n".join(lines)
 
     def remind(self) -> None:
@@ -878,7 +884,12 @@ class Notifier:
             if not since or now - since < every:
                 continue
             n = int((now - since) // every)
-            if t.state == "needs_input":
+            if t.no_change_asked:
+                who = self.mention(t.tag_author)
+                text = (f"⏰ {who}{self.line(t.task_id, t)}: the agent found nothing to change, and that still waits "
+                        f"for your decision (asked {ago(now - since)} ago). Close the ticket if you agree, or reply "
+                        f"with what still needs doing: {self.issue_url(t.task_id)}")
+            elif t.state == "needs_input":
                 left = self.cfg.limits.needs_input_fail_after.total_seconds() - (now - since)
                 who = self.mention(t.tag_author)
                 text = (f"⏰ {who}{self.line(t.task_id, t)} still waits for an answer (asked {ago(now - since)} ago). "

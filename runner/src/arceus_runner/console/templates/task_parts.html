@@ -11,7 +11,7 @@
 {% if t.question %}
 {% set q = t.question %}
 <section class="card question" id="question">
-  <h2>{% if q.blocked %}The agent cannot go on without a decision{% else %}The agent's question{% endif %}</h2>
+  <h2>{% if q.no_change %}The agent found nothing to change{% elif q.blocked %}The agent cannot go on without a decision{% else %}The agent's question{% endif %}</h2>
   {% if q.unreadable %}
   <p>The question's record cannot be read here. The ticket has it.</p>
   {% else %}
@@ -22,7 +22,7 @@
   {% endif %}
   {% endif %}
   <p class="answer-here">{% if t.issue_url %}<a class="btn primary" href="{{ t.issue_url }}" target="_blank" rel="noopener">Answer on the ticket<span class="external" aria-hidden="true">↗</span><span class="sr"> (opens in a new tab)</span></a>{% endif %}
-    <span class="note">{% if q.options %}Reply with a comment: the option's number or your own words.{% else %}Reply with a comment on the ticket.{% endif %} The console does not send answers.</span></p>
+    <span class="note">{% if q.no_change %}Close the ticket if you agree, or reply with a comment saying what still needs doing.{% elif q.options %}Reply with a comment: the option's number or your own words.{% else %}Reply with a comment on the ticket.{% endif %} The console does not send answers.</span></p>
 </section>
 {% endif %}
 </div>
@@ -59,7 +59,10 @@
       {% set a = t.limits.answer %}
       <li data-limit="answer">
         <span class="meter-name">Time to answer</span>
-        {% if a.known %}
+        {% if a.no_deadline %}
+        <span class="meter-num">no deadline</span>
+        <span class="note">The agent's conclusion that nothing needs changing waits until the ticket is closed or someone replies. It does not fail on its own.</span>
+        {% elif a.known %}
         <span class="meter-num">{% if a.left > 0 %}{{ duration(a.left) }} left{% else %}over{% endif %}</span>
         <span class="note">Asked {{ a.asked|at }}. Without an answer by {{ a.deadline|at }} ({{ a.of }} after the question) the task fails.</span>
         {% else %}

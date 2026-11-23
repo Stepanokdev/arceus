@@ -286,6 +286,24 @@ def run_until(w: World, task_id: str, states: tuple[str, ...], limit: timedelta 
                          f"engine {show.get('state')}")
 
 
+ANSWER = ("There are no requirements beyond the ticket and the review comments: no other Python version, no other "
+          "environment. Decide the rest yourself the simplest way that keeps the tests green, and finish.")
+
+
+def run_answering(w: World, task_id: str, db: str, states: tuple[str, ...], answers: int = 2) -> str:
+    """run_until, and when the agent or the review stops for a question, the answer a person on the ticket would
+    give (ANSWER), up to `answers` times: which way a model goes is not what a live scenario is about, and the
+    runner's handling of a question is covered in test_real_gate.py."""
+    while True:
+        state = run_until(w, task_id, (*states, "needs_input"))
+        if state != "needs_input" or answers == 0:
+            return state
+        say(f"{task_id}: answering its question as a person would")
+        w.yt.comment(db, "a.smith", ANSWER)
+        answers -= 1
+        run_until(w, task_id, ("dispatched",), timedelta(minutes=10))
+
+
 def codex_verdict(w: World) -> str:
     """The review gate's last verdict as Codex wrote it. The engine keeps the reasons of a FAIL in the
     receipt (review_why), but a PASS only in its Codex log."""
@@ -360,11 +378,12 @@ def test_review_comment_and_red_ci_are_follow_ups_of_the_task(w):
         w.tick()  # the runner sees the note; it goes to the agent once review_debounce has passed since
         w.now += w.cfg.schedule.review_debounce + timedelta(minutes=1)
         run_until(w, "ACME-1", ("dispatched",), timedelta(minutes=10))
-        assert run_until(w, "ACME-1", ("code_review", "failed")) == "code_review"
+        assert run_answering(w, "ACME-1", db, ("code_review", "failed")) == "code_review", w.store.task("ACME-1").reason
         published_is_reviewed(w, "ACME-1")
         second = w.remote_branch(w.store.task("ACME-1").branch)
         assert second != first
 
+        answers_before = len([t for t in w.bot_comments(db) if "[arceus:nochange:" in t])
         w.gl.mr(iid)["head_pipeline"] = {"id": 900, "sha": second, "status": "failed",
                                          "web_url": "https://gl/clients/acme/acme-platform/-/pipelines/900"}
         w.gl.jobs[900] = [{"id": 9001, "name": "unit", "stage": "test", "status": "failed",
@@ -373,11 +392,25 @@ def test_review_comment_and_red_ci_are_follow_ups_of_the_task(w):
                              "FAIL: test_count_users_domain (tests.test_users.UsersTest)\n"
                              "AssertionError: 2 != 1 : a domain must match the whole part after '@', "
                              "so 'ann@acme.example.org' is not in 'acme.example'\n")
+        attempts = len(w.runner.delivery.engine.show("ACME-1")["attempts"])
         w.tick()
         w.now += w.cfg.schedule.review_debounce + timedelta(minutes=1)
-        run_until(w, "ACME-1", ("dispatched", "code_review"), timedelta(minutes=10))
-        if w.store.task("ACME-1").state == "dispatched":
-            run_until(w, "ACME-1", ("code_review", "failed"))
+        # The task is in Code Review already: waiting for that state alone would pass with no repair at all.
+        run_until(w, "ACME-1", ("dispatched",), timedelta(minutes=10))
+        assert w.store.task("ACME-1").ci_attempts == 1
+        assert len(w.runner.delivery.engine.show("ACME-1")["attempts"]) == attempts + 1
+        assert run_answering(w, "ACME-1", db, ("code_review", "failed")) == "code_review", w.store.task("ACME-1").reason
+        # The pipeline's log is made up and may not match the code the agent wrote. Two honest ends, nothing else:
+        # a new commit in the same MR, the one Codex passed in this attempt; or the agent shows the failure does not
+        # reproduce, the ticket says it changed nothing and why, and the MR keeps its commit.
+        third = w.remote_branch(w.store.task("ACME-1").branch)
+        assert [m["iid"] for m in w.gl.mrs] == [iid]
+        published_is_reviewed(w, "ACME-1")
+        answered = [t for t in w.bot_comments(db) if "[arceus:nochange:" in t]
+        if third == second:
+            assert len(answered) > answers_before, \
+                "the red pipeline's attempt neither published a commit nor said why it changed nothing"
+        say(f"ACME-1: the red pipeline ended with {'a new commit ' + third[:12] if third != second else 'an answer'}")
     finally:
         obs.write({"ticket_comments": w.bot_comments(db)})
 

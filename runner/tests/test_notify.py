@@ -357,6 +357,23 @@ def test_reminders_daily_in_working_hours_and_none_after_the_answer(b):
     assert b.events_named("slack_dropped")[-1]["reason"] == "the task moved on before it went out"
 
 
+def test_the_agents_no_change_conclusion_says_how_to_accept_it_and_never_threatens_a_failure(b):
+    b.task()
+    b.notifier.tick("working")
+    b.flush()
+    b.task(state="needs_input", question_id=None, question_at_ms=int(NOW.timestamp() * 1000),
+           question=json.dumps({"id": None, "text": "The agent changed no code: /healthz already exists.",
+                                "options": [], "no_change": True}))
+    b.notifier.tick("waiting")
+    [q] = b.flush()
+    assert "found nothing to change and needs your decision." in q and "/healthz already exists." in q
+    assert "Close the ticket if you agree, or reply on it with what still needs doing" in q
+    b.clock.t = datetime(2026, 10, 22, 6, 30, tzinfo=UTC)  # 09:30 two days later
+    b.notifier.tick("waiting")
+    [r] = [x for x in b.flush() if "⏰" in x]
+    assert "<@U0JDOE>" in r and "Close the ticket if you agree" in r and "fail" not in r
+
+
 def test_held_text_mentions_the_security_reviewers(b):
     b.task()
     b.notifier.tick("working")

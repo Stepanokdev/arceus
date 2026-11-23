@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -20,6 +22,8 @@ import pytest
 from .test_delivery import World, git
 
 ENGINE = os.environ.get("ARCEUS_REAL_ENGINE")
+# Read before any test patches shutil.which (no_real_tools patches the module itself, not a copy of it).
+TMUX_DIR = Path(shutil.which("tmux") or "/usr/bin/tmux").parent
 pytestmark = pytest.mark.skipif(not ENGINE, reason="set ARCEUS_REAL_ENGINE to the installed engine folder")
 
 
@@ -28,6 +32,8 @@ def no_real_tools(monkeypatch):
     monkeypatch.setattr("arceus_runner.health.shutil.which", lambda name: f"/usr/bin/{name}")
     # The worker here is `cat`: whether Claude is signed in on this machine does not matter.
     monkeypatch.setattr("arceus_runner.loop.engine_doctor", lambda engine: [])
+    # On a server the engine is root's; a checkout on a Mac is the developer's own, and that is not under test.
+    monkeypatch.setattr("arceus_runner.bulava._writable_by_us", lambda root: [])
 
 
 @pytest.fixture
@@ -40,12 +46,15 @@ def _world(tmp_path, secrets, settings=None, **env_over):
     stub.write_text("#!/bin/bash\nexec sleep 300\n")
     stub.chmod(0o755)
     (tmp_path / "cc").mkdir()
-    (tmp_path / "tmux").mkdir(mode=0o700)
+    # tmux's socket path has to fit in 104 bytes on macOS, and pytest's temporary folders there are longer.
+    tmux_dir = Path(tempfile.mkdtemp(prefix="arc-tmux-", dir="/tmp"))
     env = {
         "SUPERVISOR_CLAUDE_CMD": "cat", "SUPERVISOR_REQUIRE_HANDSHAKE": "0", "SUPERVISOR_HANDSHAKE_WAIT": "0",
         "SUPERVISOR_PROMPT_WAIT": "1", "SUPERVISOR_WATCHDOG_CMD": str(stub), "SUPERVISOR_NO_SKILL_PICK": "1",
         "SUPERVISOR_PREFLIGHT_ENABLE": "0", "CLAUDE_CONFIG_DIR": str(tmp_path / "cc"),
-        "TMUX_TMPDIR": str(tmp_path / "tmux"), "SUPERVISOR_RELEASE_DELAY": "0",
+        "TMUX_TMPDIR": str(tmux_dir), "SUPERVISOR_RELEASE_DELAY": "0",
+        # The engine's own PATH (Engine.env) with this machine's tmux folder in front: /opt/homebrew/bin on a Mac.
+        "PATH": f"{TMUX_DIR}:/usr/local/bin:/usr/bin:/bin",
         **env_over,
     }
     world = World(tmp_path, secrets, engine_dir=Path(ENGINE), engine_env=env, settings=settings)
@@ -53,6 +62,7 @@ def _world(tmp_path, secrets, settings=None, **env_over):
     subprocess.run(["tmux", "-L", "bulava", "kill-server"], env={**os.environ, "TMUX_TMPDIR": env["TMUX_TMPDIR"]},
                    capture_output=True)
     subprocess.run(["pkill", "-f", str(stub)], capture_output=True)
+    shutil.rmtree(tmux_dir, ignore_errors=True)
     world.events.close()
     world.store.close()
 
@@ -178,7 +188,7 @@ def test_a_worker_is_launched_with_no_claude_check_settings(tmp_path, secrets):
     try:
         # What the unit starts: the engine's tmux server with the server profile and nothing from a task.
         unit_env = {"HOME": os.environ["HOME"], "PATH": os.environ["PATH"], "LANG": "C.UTF-8",
-                    "TMUX_TMPDIR": str(tmp_path / "tmux"), "SUPERVISOR_PROFILE": "server"}
+                    "TMUX_TMPDIR": world.engine_env["TMUX_TMPDIR"], "SUPERVISOR_PROFILE": "server"}
         subprocess.run(["tmux", "-L", "bulava", "new-session", "-d", "-s", "keeper", "sleep infinity"],
                        env=unit_env, check=True)
         world.yt.add_issue(1, ("a1", "j.doe", "+agent"))
@@ -247,12 +257,12 @@ def test_a_code_review_runs_as_its_own_engine_task(tmp_path):
 
 
 def test_a_test_run_keeps_its_own_review_of_the_report_across_a_continue(tmp_path, secrets):
-    """Bulava 1.20: a test run is sent with three report rounds, its own criteria in place of the server's rule
+    """Bulava 1.20: a test run is sent with its report rounds, its own criteria in place of the server's rule
     and acceptance with notes at the limit. The engine copies the criteria when it takes the task and puts the
     budget into the dispatch the review gate reads; a later attempt (`worker-send --relation continue`, what the
     runner sends after a crash) is reviewed by the same budget."""
     import json
-    from arceus_runner.qa import REPORT_CRITERIA
+    from arceus_runner.qa import REPORT_CRITERIA, QaAgent
     from arceus_runner.screening import trusted
     instructions = tmp_path / "qa" / "instructions.md"
     instructions.parent.mkdir(parents=True)
@@ -282,7 +292,7 @@ cat "$I/report-criteria.md"
             return json.loads(first), rest
 
         g, criteria = gates()
-        assert (g["reportReview"], g["reportMaxRounds"], g["reportAtLimit"]) == (True, 3, "accept")
+        assert (g["reportReview"], g["reportMaxRounds"], g["reportAtLimit"]) == (True, QaAgent.REPORT_ROUNDS, "accept")
         assert criteria.strip() == REPORT_CRITERIA.strip()
 
         # What the review reads, found and read by the engine's own code as review-gate.sh does it: the findings
@@ -319,7 +329,7 @@ cat "$I/report-criteria.md"
         show = wait_state(w, rid, "running")
         assert [a["kind"] for a in show["attempts"]] == ["initial", "continue"]
         g, criteria = gates()
-        assert (g["reportReview"], g["reportMaxRounds"], g["reportAtLimit"]) == (True, 3, "accept")
+        assert (g["reportReview"], g["reportMaxRounds"], g["reportAtLimit"]) == (True, QaAgent.REPORT_ROUNDS, "accept")
         assert criteria.strip() == REPORT_CRITERIA.strip()
     finally:
         next(gen, None)
@@ -330,6 +340,7 @@ def test_a_report_longer_than_the_review_reads_is_reviewed_part_by_part(tmp_path
     attempt that reviewed the first ends `done`, the runner asks for another attempt naming the second, and the
     engine's own find-report and report-text give the reviewer that part whole, to its last line."""
     import json
+    from arceus_runner.qa import QaAgent
     instructions = tmp_path / "qa" / "instructions.md"
     instructions.parent.mkdir(parents=True)
     instructions.write_text("Platform: https://staging.example.com\nCheck everything.\n")
@@ -380,7 +391,8 @@ def test_a_report_longer_than_the_review_reads_is_reviewed_part_by_part(tmp_path
         show = wait_state(w, rid, "running")
         assert [a["kind"] for a in show["attempts"]] == ["initial", "continue"]
         rec = dispatch_record()
-        assert (rec["pipeline_gates"]["reportMaxRounds"], rec["pipeline_gates"]["reportAtLimit"]) == (3, "accept")
+        gates = rec["pipeline_gates"]
+        assert (gates["reportMaxRounds"], gates["reportAtLimit"]) == (QaAgent.REPORT_ROUNDS, "accept")
         assert f"artifacts/{rid}/findings-2.txt" in rec["task"]
         text = reviewer_reads(f"artifacts/{rid}/findings-2.txt Checked 220 things.")
         assert text.rstrip().endswith(json.dumps(second, separators=(",", ":"))[-60:].rstrip()) and marker in text

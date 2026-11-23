@@ -3,8 +3,8 @@
 # setup script's test. The sandbox (sandbox/) and its live scenarios are not part of it: they are for work on
 # the pipeline itself and run by hand, sandbox/sandbox.sh test and sandbox/sandbox.sh live.
 # Exits non-zero when a part fails. No model is called.
-# --offline leaves out the one step that needs the network (the engine's real upstream on GitHub): what CI runs
-# on every pull request and merge, so a GitHub hiccup upstream never turns a change red.
+# --offline leaves out the steps that need the network (the console image's base image and PyPI, the engine's real
+# upstream on GitHub): what CI runs on every pull request and merge, so a network hiccup never turns a change red.
 set -uo pipefail
 cd "$(dirname "$0")"
 

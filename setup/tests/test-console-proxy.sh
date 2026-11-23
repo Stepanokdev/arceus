@@ -50,7 +50,7 @@ console_get() {
 }
 console_nginx_conf > "$T/nginx.conf"
 
-mkdir -p "$T/build/runner" "$T/data"
+mkdir -p "$T/build/runner" "$T/build/extra" "$T/data"   # extra/: no RUNNER_EXTRA_PACKAGES, as setup.sh leaves it
 rsync -a --exclude __pycache__ --exclude '*.egg-info' --exclude build \
   "$ROOT/runner/pyproject.toml" "$ROOT/runner/src" "$T/build/runner/"
 docker build --quiet -t "$TAG" -f "$ROOT/console/Dockerfile" "$T/build" >/dev/null || { echo "FAIL image build"; exit 1; }

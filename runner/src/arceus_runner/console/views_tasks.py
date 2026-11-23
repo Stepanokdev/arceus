@@ -69,7 +69,9 @@ def _limits(cfg: Config, task, now: float, config_note: str) -> dict:
         r["pct"] = min(100, round(100 * r["used"] / r["max"])) if r["max"] else 0
         r["level"] = "bad" if r["used"] >= r["max"] else "warn" if r["used"] >= r["max"] - 1 else "ok"
     answer = None
-    if task.state == "needs_input":
+    if task.no_change_asked:
+        answer = {"no_deadline": True}
+    elif task.state == "needs_input":
         fail_after = lim.needs_input_fail_after.total_seconds()
         if task.question_at_ms:
             asked = task.question_at_ms / 1000
@@ -186,6 +188,7 @@ def gather(cfg: Config, key: str, config_path, now: float | None = None) -> dict
         q = ex.question(task) if taken else None
         facts = ex.Facts(
             state=state, kind=task.kind if task else "code", blocked=bool(q and q["blocked"]),
+            no_change=bool(q and q["no_change"]),
             turn=(view or review_view or {}).get("turn", ""),
             used_up=used_up if (running or (review_view and under_way.state == "running")) else [],
             holder="" if holder == key else holder, can_take=m.can_take, mode=mode, drain_by=drain,

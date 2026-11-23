@@ -356,7 +356,7 @@ def test_verdicts_are_read_defensively_and_every_reference_is_checked(make):
     assert [secops.advisory_id(x) for x in (11, "12", True, 1.0, None)] == [11, "12", None, None, None]  # true is not 1
     nested = w.tmp / "nested"
     nested.mkdir()
-    (nested / "verdicts.json").write_text("[" * 20000 + "]" * 20000)
+    (nested / "verdicts.json").write_text("[" * 200_000 + "]" * 200_000)  # deeper than json reads on 3.13 and 3.14
     assert secops.load_verdicts(nested, {11: "SEC-11"}, {"acme-platform"}, 120) == (
         {}, ["the verdicts file could not be read (RecursionError)"])
     note = "x" * 1500  # every repository the stack notes left out, each with its rule: kept whole

@@ -48,10 +48,13 @@ from arceus_runner.texts import (
     START_REFUSED,
     comments_section,
     log_hint,
+    no_change_foot,
+    no_change_question,
     parent_section,
     parse_ts,
     piece_kind,
     research_brief,
+    review_findings,
     review_question,
     review_stop,
     short_text,
@@ -65,10 +68,20 @@ from arceus_runner.texts import (
 FAIL_REASONS = {
     "debt": "the work did not pass review",
     "codex_unavailable": "the review step is unavailable",
-    "needs-user": "the review asked for a person's decision",
     "scope_violation": "the agent went outside the task's scope",
     "stalled": "the agent's session stopped at its prompt without finishing, again after being asked to finish",
 }
+# How Bulava's review gate words the stops the runner tells apart (hooks/review-gate.sh, `receipt.review_why` and the
+# headings in `blocked.md`). tests/test_real_gate.py fails when an engine update changes one of them.
+GATE_NO_CHANGE = "Declared 'succeeded_no_change' with an empty diff"
+GATE_UNREACHABLE = "reviewer unreachable"
+GATE_UNCOMMITTED = "uncommitted work after"
+GATE_WORKER_FAILED = "worker declared: failed"
+GATE_WORKER_BLOCKER = "worker blocker finding:"
+GATE_STALLED = "(stalled:"
+GATE_FAIL = "VERDICT: FAIL"
+GATE_VERIFIER = "[VERIFIER OVERRIDE]"
+GATE_STOPPED = "the review stopped the work without a decision the runner can act on"  # any other `needs-user`
 STALLED_NUDGE = ("Your previous session stopped at its prompt without finishing the turn, and Bulava parked it. "
                  "Pick the task up from where the work stands: finish it, commit in every repository you "
                  "changed, and declare the outcome.")
@@ -731,6 +744,12 @@ class Delivery:
                 self.fail(task, f"The change passed review, {verdict}, so it was not published",
                           self._debt_details(task, receipt, outcome, failed + unproven), attempt=len(attempts))
                 return
+            if why == "debt" and self._nothing_changed(receipt, outcome):
+                # The agent concluded that nothing needs changing, and no repository moved off its base. Bulava reviews
+                # no such claim and banks it as debt; it is not a failure but a conclusion for a person to accept
+                # (closing the ticket) or send back (a reply).
+                self.ask(task, show, no_change=True)
+                return
             if why == "needs-user":
                 asked = self._review_asked(receipt, attempts)
                 if asked:
@@ -738,8 +757,18 @@ class Delivery:
                     # ticket, and a plain reply takes the work on, as with any other question.
                     self.ask(task, show, review_asked=asked)
                     return
-            reason = FAIL_REASONS.get(why) or FAIL_REASONS.get(outcome.get("reason") or "") or why
-            self.fail(task, reason, outcome.get("summary") or "", attempt=len(attempts))
+                said = receipt.get("review_why") or ""
+                if said.startswith(GATE_WORKER_BLOCKER):
+                    # The agent filed a `blocker` finding: it waits for a person to give or do something (a log, an
+                    # access, a re-run), as when it declares `blocked`. A question, and a plain reply takes it on.
+                    needs = [f for f in receipt.get("findings") or []
+                             if isinstance(f, dict) and f.get("kind") == "blocker"]
+                    if not needs:
+                        needs = [{"kind": "blocker", "text": said.removeprefix(GATE_WORKER_BLOCKER).strip()}]
+                    self.ask(task, show | {"receipt": receipt | {"findings": needs}})
+                    return
+            reason, details = self._gate_stop(task, why, receipt, outcome, attempts)
+            self.fail(task, reason, details, attempt=len(attempts))
         else:
             self.events.emit("unknown_engine_state", task_id=task.task_id, state=state)
 
@@ -825,46 +854,128 @@ class Delivery:
             self.events.emit("notify_pending", task_id=task.task_id, reason=str(e))
         return True
 
-    def _review_asked(self, receipt: dict, attempts: list[dict]) -> str:
-        """What the reviewers asked a person when they stopped this attempt (`texts.review_stop`), from the review
-        gate's note in the attempt's run folder; empty for any other `needs-user`. The note is read only for the
-        run of the receipt, and only when that is the last attempt's: an earlier attempt's note never stands for
-        this one."""
+    def _nothing_changed(self, receipt: dict, outcome: dict) -> bool:
+        """An unreviewed `succeeded_no_change` with nothing on the branch at all: every repository the receipt lists
+        clean and still at its base. Commits an earlier attempt left, or checks that failed, are not this case."""
+        said = receipt.get("review_why") or ""
+        if outcome.get("result") != "succeeded_no_change" or GATE_VERIFIER in said:
+            return False
+        if (receipt.get("codex") or {}).get("status") != "unreviewed" and not said.startswith(GATE_NO_CHANGE):
+            return False
+        repos = receipt.get("repos") or []
+        if not repos or self._verifier_gaps(receipt, causes=False)[0]:
+            return False
+        return all(r.get("clean") and r.get("base_sha") and r.get("reviewed_sha") == r.get("base_sha") for r in repos)
+
+    def _gate_note(self, receipt: dict, attempts: list[dict]) -> str:
+        """The review gate's notes for this attempt (`runs/<run_id>/reports/blocked.md`), or nothing. The note is
+        read only for the run of the receipt, and only when that is the last attempt's: an earlier attempt's note
+        never stands for this one."""
         run_id = str(receipt.get("run_id") or "")
         last = (attempts[-1].get("run_id") if attempts else None) or run_id
         if not run_id or run_id != last or "/" in run_id or run_id.startswith("."):
             return ""
-        note = self.cfg.paths.bulava_state / "runs" / run_id / "reports" / "blocked.md"
         try:
-            return self.events.redact(review_stop(note.read_text(errors="replace")))
+            note = self.cfg.paths.bulava_state / "runs" / run_id / "reports" / "blocked.md"
+            return note.read_text(errors="replace")
         except OSError:
             return ""
 
-    def _verifier_gaps(self, receipt: dict) -> tuple[list[str], list[str]]:
-        """The verifier's failed and inconclusive checks for this run, one line each, from its evidence.json."""
-        failed, unproven = [], []
+    def _review_asked(self, receipt: dict, attempts: list[dict]) -> str:
+        """What the reviewers asked a person when they stopped this attempt (`texts.review_stop`), from the review
+        gate's note; empty for any other `needs-user`."""
+        return self.events.redact(review_stop(self._gate_note(receipt, attempts)))
+
+    def _gate_stop(self, task: Task, why: str, receipt: dict, outcome: dict, attempts: list[dict]) -> tuple[str, str]:
+        """The reason and the details a failed attempt puts on the ticket. `needs-user` and `debt` cover several
+        different stops of the review gate; each one Bulava names in its receipt gets words of its own, so the ticket
+        says what happened rather than that a review wanted something. Only what the runner picked out goes on the
+        ticket, never `review_why` whole: it can hold a CLI's stderr and paths on the server."""
+        summary = outcome.get("summary") or ""
+        said = receipt.get("review_why") or ""
+        # Names and exit codes only: what a check printed stays in the run's own logs on the server.
+        failed, unproven = self._verifier_gaps(receipt, causes=False) if why in ("debt", "needs-user") else ([], [])
+        if failed or GATE_VERIFIER in said:
+            self._log_verifier_gaps(task, receipt)
+            # The project's own checks failed in this attempt's last round, so Bulava turned whatever Codex said into
+            # a FAIL until the gate's limit (which banks it as debt with no words of its own): the failing checks are
+            # the reason, not the review.
+            return ("the project's automated checks kept failing, so the work was not accepted",
+                    self._debt_details(task, receipt, outcome, failed + unproven))
+        if why == "debt" and outcome.get("result") == "succeeded_no_change" and (
+                (receipt.get("codex") or {}).get("status") == "unreviewed" or said.startswith(GATE_NO_CHANGE)):
+            # Bulava reviews no claim that nothing needs changing (engine/SERVER.md, "unreviewed"). With nothing on
+            # the branch it is a question (_nothing_changed); here the branch has commits no review passed.
+            moved = [r for r in receipt.get("repos") or [] if r.get("reviewed_sha") != r.get("base_sha")]
+            if moved:
+                return ("the agent's last attempt said nothing more needed changing, but the commits it made earlier "
+                        "were never reviewed, so nothing was published", self._debt_details(task, receipt, outcome))
+            return ("the agent changed no code, saying none was needed, and that conclusion was not reviewed "
+                    "in this attempt", summary)
+        if why == "needs-user":
+            if said.startswith(GATE_UNREACHABLE):
+                return "the reviewer (Codex) could not be reached, so the work was not reviewed", summary
+            if said.startswith(GATE_UNCOMMITTED):
+                where = sorted({Path(p).name for p in said.partition(":")[2].split() if p.startswith("/")})
+                left = f"Left uncommitted in: {', '.join(where)}." if where else ""
+                return ("the agent left work uncommitted after being asked to commit it",
+                        "\n\n".join(x for x in (left, summary) if x))
+            if said.startswith(GATE_WORKER_FAILED):
+                return "the agent reported that it could not finish the task", summary
+            last = re.split(r"(?m)^(?=## )", self._gate_note(receipt, attempts).strip())[-1].partition("\n")[0]
+            if GATE_STALLED in last:
+                found = review_findings(said)
+                listed = ["The review's findings that kept coming back:",
+                          *(f"- {self.events.redact(f)}" for f in found)]
+                return ("the review kept finding the same problems, with no progress between rounds",
+                        "\n\n".join(x for x in ("\n".join(listed) if found else "", summary) if x))
+            if GATE_FAIL in said:
+                # Rounds ran out (the gate's hard limit) with findings the fix check never saw closed.
+                found = review_findings(said)
+                listed = ["The review's findings still open:", *(f"- {self.events.redact(f)}" for f in found)]
+                return ("the review still found problems when its rounds ran out",
+                        "\n\n".join(x for x in ("\n".join(listed) if found else "", summary) if x))
+            return GATE_STOPPED, summary
+        return FAIL_REASONS.get(why) or FAIL_REASONS.get(outcome.get("reason") or "") or why, summary
+
+    def _verifier_criteria(self, receipt: dict) -> list[tuple[Path, dict]]:
+        """The verifier's failed and inconclusive checks for this run, as its evidence.json files have them."""
         run_id = receipt.get("run_id") or ""
         if not run_id or "/" in run_id:
-            return failed, unproven
+            return []
+        out = []
         for path in sorted((self.cfg.paths.bulava_state / "runs" / run_id / "evidence").glob("*/evidence.json")):
             try:
                 criteria = json.loads(path.read_text()).get("criteria") or []
             except (OSError, ValueError, AttributeError):
                 continue
-            for c in criteria:
-                status = c.get("status")
-                if status not in ("fail", "inconclusive"):
-                    continue
-                line = f"`{c.get('criterion') or c.get('command') or '?'}`"
-                if status == "fail":
-                    line += f" failed (exit {c.get('exit_code')})"
-                else:
-                    line += " was inconclusive"
-                hint = c.get("note") or log_hint(path.parent / Path(c.get("artifact") or "").name)
-                if hint:
-                    line += f": {hint}"
-                (failed if status == "fail" else unproven).append(line)
+            out += [(path, c) for c in criteria if isinstance(c, dict) and c.get("status") in ("fail", "inconclusive")]
+        return out
+
+    def _verifier_gaps(self, receipt: dict, causes: bool = True) -> tuple[list[str], list[str]]:
+        """The verifier's failed and inconclusive checks, one line each for the ticket, never with a check's command
+        (it can carry a token or an address). `causes`: the check's name as its author wrote it, and the line of its log
+        (or its note) that names the cause, through the runner's redaction. Without it only a neutral label ("check 2",
+        in the evidence's order) and the exit code: what the agent or the project wrote stays in the run's evidence on
+        the server (`_log_verifier_gaps` says which run)."""
+        failed, unproven = [], []
+        for n, (path, c) in enumerate(self._verifier_criteria(receipt), 1):
+            name = short_text(str(c.get("criterion") or "").strip(), 200) if causes else ""
+            line = f"`{name}`" if name else f"check {n}"
+            line += f" failed (exit {c.get('exit_code')})" if c.get("status") == "fail" else " was inconclusive"
+            hint = (c.get("note") or log_hint(path.parent / Path(c.get("artifact") or "").name)) if causes else ""
+            if hint:
+                line += f": {hint}"
+            (failed if c.get("status") == "fail" else unproven).append(self.events.redact(line))
         return failed, unproven
+
+    def _log_verifier_gaps(self, task: Task, receipt: dict) -> None:
+        """Which check a ticket's label stands for, in the event log: its number, status and exit code, and the run whose
+        evidence has the rest. The event log goes on to Loki, so a check's name, command, note and output stay in the
+        run's own evidence on the server (`runs/<run_id>/evidence/*/evidence.json`), never in the event."""
+        for n, (_, c) in enumerate(self._verifier_criteria(receipt), 1):
+            self.events.emit("verifier_gap", task_id=task.task_id, run_id=receipt.get("run_id"), check=n,
+                             status=c.get("status"), exit_code=c.get("exit_code"))
 
     def _debt_details(self, task: Task, receipt: dict, outcome: dict, gaps: list[str] = ()) -> str:
         """Where the unpublished work is and what the review noted, for the person who decides next."""
@@ -1200,16 +1311,20 @@ class Delivery:
             except GitError as e:
                 self.events.emit("research_leftovers_kept", task_id=task.task_id, repo=name, reason=str(e))
 
-    def ask(self, task: Task, show: dict, review_asked: str = "") -> None:
+    def ask(self, task: Task, show: dict, review_asked: str = "", no_change: bool = False) -> None:
         """The question on the ticket, tagged needs-input: the agent's own, or what the reviewers asked when they
         stopped the work (`review_asked`). A stop with no question in words says that nothing is published and
-        what the agent named as needed, so the ticket never reads as a report with nothing asked."""
+        what the agent named as needed, so the ticket never reads as a report with nothing asked. `no_change`: the
+        agent's conclusion that nothing needs changing, for a person to accept by closing the ticket."""
         q = show.get("question") or {}
         outcome = show.get("outcome") or {}
         attempt = len(show.get("attempts") or [])
         report = outcome.get("summary") or ""
         mrs = [m.url for m in self.store.task_mrs(task.task_id) if m.url]  # a later round: these stay as they were
-        if review_asked:
+        if no_change:
+            q = {}
+            text = no_change_question(report)
+        elif review_asked:
             q = {}
             text = review_question(review_asked, report, mrs)
         elif q.get("text"):
@@ -1225,18 +1340,24 @@ class Delivery:
                           else "Reply with a comment on this ticket: your decision on each point. The agent "
                                "continues with it, and the work is reviewed again before anything is published."
                           if review_asked else "Reply with a comment on this ticket."]).strip()
+        if no_change:
+            foot = no_change_foot()
+        ask_head = "the agent found nothing to change and needs your decision:" if no_change else \
+            "the agent needs an answer to continue:"
         posted = self.post_whole(task, f"question:{q.get('id') or attempt}",
-                                 f"{self.tracker.mention(task.tag_author)}, the agent needs an answer to continue:",
+                                 f"{self.tracker.mention(task.tag_author)}, {ask_head}",
                                  text, foot, visuals=self.publisher.task_media(task))[0]
         self.tracker.add_tag(task.issue_db_id, self.cfg.tracker.tags.needs_input)
         # The words go with the state, whole as the ticket got them: the console's task page shows them, and the
         # project's channel (notify.py) quotes them, cut to its own length, whenever it tells the question.
         words = {"id": q.get("id"), "text": short_text(text, QUESTION_KEEP), "options": list(q.get("options") or []),
-                 "blocked": show.get("state") == "blocked", "review": bool(review_asked)}
+                 "blocked": show.get("state") == "blocked", "review": bool(review_asked),
+                 **({"no_change": True} if no_change else {})}
         self.store.update_task(task.task_id, state="needs_input", question_id=q.get("id"),
                                question_at_ms=posted[1] if posted else None, question=json.dumps(words))
         self.events.emit("task_needs_input", task_id=task.task_id, question_id=q.get("id"),
-                         blocked=words["blocked"], **({"review": True} if review_asked else {}))
+                         blocked=words["blocked"], **({"review": True} if review_asked else {}),
+                         **({"no_change": True} if no_change else {}))
 
     def open_threads(self, task: Task, ref: str) -> tuple[str, list[str]]:
         """The open MR discussions not addressed to the agent, for the comment on the ticket `ref`
@@ -1262,6 +1383,8 @@ class Delivery:
         c = self.cfg.tracker
         for task in self.store.tasks("needs_input"):
             try:
+                if task.no_change_asked and self._closed_on_no_change(task):
+                    continue
                 after = task.question_at_ms or 0
                 # >=: a reply in the same millisecond as the question counts. The engine dedups by
                 # message id, so a comment seen twice is sent once.
@@ -1488,13 +1611,41 @@ class Delivery:
         return any((t := self.store.task(task_id)) and t.state != "security_hold"
                    for _, task_id, _ in self.store.pending_continues())
 
+    def _closed_on_no_change(self, task: Task) -> bool:
+        """A person closed the ticket while it held the agent's no-change conclusion: they accepted it. Closed is what
+        the tracker itself says (YouTrack's `resolved`), never a guess from the state's name: a ticket moved to another
+        open state, or with no state, still waits and a reply still takes the work on. The task is done, without a
+        failure, and the needs-input tag comes off (journaled with the state, so a tracker outage leaves it to
+        retry_pending()). A comment on a ticket that is closed is not sent to the agent: closing is the decision."""
+        c = self.cfg.tracker
+        issue = self.tracker.issue(task.task_id)
+        if not issue.closed:
+            return False
+        where = f" (\"{issue.state}\")" if issue.state else ""
+        with self.store.transaction():
+            self.store.update_task(task.task_id, state="done", question_id=None, question_at_ms=None,
+                                   reason=f"no code changes: a person closed the ticket{where}")
+            self.store.action_intent(f"{task.task_id}:untag:{c.tags.needs_input}:closed:{task.question_at_ms}",
+                                     task.task_id, "untag", json.dumps({"tag": c.tags.needs_input}))
+        self.events.emit("task_done", task_id=task.task_id, reason="no change accepted", state=issue.state)
+        self.retry_pending()
+        return True
+
     def _unanswered(self, task: Task) -> None:
-        """No answer yet: a reminder after needs_input_reminder, Failed after needs_input_fail_after."""
+        """No answer yet: a reminder after needs_input_reminder, Failed after needs_input_fail_after. The agent's
+        no-change conclusion never fails: it waits for the ticket to be closed or for a reply, with one reminder."""
         if not task.question_at_ms:
             return
         asked = datetime.fromtimestamp(task.question_at_ms / 1000, UTC)
         waited = self.now() - asked
         lim = self.cfg.limits
+        if task.no_change_asked:
+            if waited > lim.needs_input_reminder:
+                self.comment_once(task, f"reminder:{task.question_at_ms}",
+                                  f"{self.tracker.mention(task.tag_author)}, the agent's conclusion above still waits "
+                                  "for your decision: close the ticket if you agree, or reply with what still needs "
+                                  "doing.")
+            return
         if waited > lim.needs_input_fail_after:
             days = lim.needs_input_fail_after.total_seconds() / 86400
             self.fail(task, f"no answer to the agent's question in {days:g} days")

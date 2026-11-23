@@ -151,7 +151,8 @@ included (before the runner has a record of the task), and shows:
   gate, the verifier or Codex has the turn, or the engine waits, it says so), and when the runner last read the
   engine's files; and whether the runner answers.
 - **Limits:** the time left to answer before `needs_input_fail_after`, counted from when the question was posted
-  (unknown when that time was not recorded), and for development the review rounds that changed code, those
+  (unknown when that time was not recorded; "no deadline" for the agent's conclusion that nothing needs changing,
+  which waits until the ticket is closed or someone replies), and for development the review rounds that changed code, those
   answered without a change and the CI repairs in a row, against `max_review_rounds`, `max_review_answers` and
   `max_ci_fix_attempts`. The figures are config.yaml's now; the page says when the file has changed since the runner
   started, since it counts with the version it started with.
