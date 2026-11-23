@@ -1442,7 +1442,10 @@ class ReviewAgent:
                 return
             self.store.action_intent(key, task.task_id, "merged-check",
                                      json.dumps({"review": row.id, "mr": mr, "why": why, "sha": st.sha}))
-        findings = [f for f in mr.get("verdict", {}).get("findings", []) if f.get("severity") == "blocker"]
+        # Only blockers the review stood by: an unconfirmed one (people changed what they asked for while it ran, or
+        # its run never finished as asked) found nothing anyone should still act on.
+        findings = [f for f in (mr.get("verdict") or {}).get("findings", [])
+                    if f.get("severity") == "blocker"] if mr["kind"] == "changes" else []
         lines = [f"**Merged without a passing code review.** {mr['url']} ({mr['repo']}) was merged {why}."]
         if findings:
             lines += ["", "What the review found that blocks the merge:",

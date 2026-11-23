@@ -1958,6 +1958,27 @@ def test_a_merge_of_commits_pushed_after_the_blockers_says_they_were_never_revie
            f"(merged at `ffffffffffff`) were never reviewed" in note
 
 
+def test_a_merge_after_an_unconfirmed_review_says_it_was_never_reviewed_without_the_reviews_old_blockers(w):
+    """People decided on the MR while the review ran, so its blockers answer an older question. The MR then merges
+    at a newer commit: the ticket hears that the merged code was never reviewed, not the blockers people ruled out."""
+    url, sha = people_mr(w)
+    db_id = people_ticket(w, url)
+    w.yt.comment(db_id, "j.doe", "/review")
+    w.tick()
+    w.gl.note(5, "o.lead", "Decision: keep the old connector fallback out, both MRs ship together.")
+    people_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "file": "uk.po", "line": 3,
+                                                    "text": "Bring back the old connector fallback"}])
+    finish(w, PEOPLE_RID)
+    assert w.store.review(PEOPLE_RID).outcome == "unverified"
+    w.gl.mr(5).update(state="merged", sha="f" * 40)
+    w.tick()
+    [note] = _merged_notes(w, db_id)
+    assert f"at `ffffffffffff`, but the code review read commit `{sha[:12]}`; the changes between them were never " \
+           "reviewed" in note
+    assert "fallback" not in note and "What the review found that blocks the merge" not in note
+    assert len(w.events_named("review_merged_unchecked")) == 1
+
+
 def test_a_merge_at_the_approved_commit_is_not_reported(w):
     url, sha = people_mr(w)
     db_id = people_ticket(w, url)
