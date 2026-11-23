@@ -178,7 +178,7 @@ class Runner:
         p = self.progress.tasks.get(task_id) if self.progress else None
         if not p:
             return None, ""
-        times = [t for t in ((p.step.since if p.step else None), p.agent_active_at) if t]
+        times = [t for t in ((p.step.since if p.step else None), p.engine_seen_at, p.agent_active_at) if t]
         return (max(times) if times else None), (f"{p.step.stage} {p.step.state}" if p.step else "")
 
     def _record_health(self, checks: list[Check]) -> None:

@@ -505,6 +505,46 @@ def test_a_busy_attempt_stops_at_the_ceiling(w):
     assert "gate.verify running" in task.reason and [c["argv"][0] for c in w.calls("night-shift")][-1] == "stop"
 
 
+def test_a_long_check_that_keeps_saying_it_runs_is_work_until_its_signal_stops_or_the_ceiling(w):
+    """A final check that runs for hours repeats one step ("gate.verify running") with a heartbeat. While the
+    heartbeat comes, the attempt is not hung though the step never changes; when it stops, silence is counted
+    from the last beat; and a check that beats forever still ends at the ceiling."""
+    from arceus_runner.progress import Step, TaskProgress
+    take(w)
+    start = datetime.now(UTC)  # the fake engine stamps the attempt with the real clock
+    p = w.runner.progress.tasks.setdefault("ACME-1", TaskProgress("ACME-1"))
+    p.step = Step("gate.verify", "running", (start + timedelta(minutes=5)).timestamp())  # the step never changes
+    for h in range(1, 12):
+        w.now = start + timedelta(hours=h)
+        p.engine_seen_at = (w.now - timedelta(minutes=1)).timestamp()  # the heartbeat
+        w.tick()
+        assert w.store.task("ACME-1").state == "dispatched", f"failed at {h} h while the check was beating"
+    # The beat stops at 11 h: 8 h of silence later it is a hang, not before.
+    w.now = start + timedelta(hours=18)
+    w.tick()
+    assert w.store.task("ACME-1").state == "dispatched"
+    w.now = start + timedelta(hours=19, minutes=30)
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "failed" and task.reason.startswith("the agent hung: no sign of activity for 8 h")
+    assert "(last step: gate.verify running)" in task.reason
+
+
+def test_a_check_that_beats_forever_ends_at_the_ceiling(w):
+    from arceus_runner.progress import Step, TaskProgress
+    take(w)
+    start = datetime.now(UTC)
+    p = w.runner.progress.tasks.setdefault("ACME-1", TaskProgress("ACME-1"))
+    p.step = Step("gate.verify", "running", (start + timedelta(minutes=5)).timestamp())
+    for h in range(1, 26):
+        w.now = start + timedelta(hours=h)
+        p.engine_seen_at = (w.now - timedelta(minutes=1)).timestamp()
+        w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "failed" and task.reason.startswith("the attempt ran out of time: no verdict in 24 h")
+    assert "gate.verify running" in task.reason
+
+
 def test_an_mr_refused_while_gitlab_does_not_know_the_pushed_branch_yet_is_asked_again(w, monkeypatch):
     """GitLab's API learns of a pushed branch a moment after the push: the MR is asked for again a few seconds
     apart, in the same tick, and only one is made."""

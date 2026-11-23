@@ -93,6 +93,7 @@ class TaskProgress:
     transcript: Path | None = None
     transcript_offset: int = 0
     agent_active_at: float | None = None
+    engine_seen_at: float | None = None  # the newest engine line of any kind, a repeated step included
     tools: Counter = field(default_factory=Counter)
     tool_errors: int = 0      # tool calls whose result came back as an error: a call is not a success
     last_tool: str = ""
@@ -260,9 +261,13 @@ class ProgressWatcher:
 
     def _set_step(self, p: TaskProgress, x: dict) -> None:
         stage, state = str(x.get("stage") or "?"), str(x.get("state") or "?")
+        # Any line is a sign of life, the same step said again included: a long final check says
+        # "still running" every minute, and the step it is on does not change.
+        at = (x.get("ms") or 0) / 1000 or self.now().timestamp()
+        p.engine_seen_at = max(p.engine_seen_at or 0.0, at)
         if p.step and (p.step.stage, p.step.state) == (stage, state):
             return
-        since = (x.get("ms") or 0) / 1000 or self.now().timestamp()
+        since = at
         p.step = Step(stage, state, since, _clip(str(x.get("note") or "")))
         p.quiet_reported = False
 

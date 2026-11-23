@@ -122,6 +122,21 @@ def test_a_restart_goes_on_from_the_saved_cursor_and_still_knows_the_step(w):
     assert [s["stage"] for s in w.emitted("engine_step")] == ["deliver", "gate", "gate.verify"]
 
 
+def test_the_same_step_said_again_is_a_sign_of_life_but_not_a_new_step(w):
+    """A long final check repeats "gate.verify running" every minute. The step stays the one it was (its
+    `since` does not move), but each line is a sign of life the timeout counts from."""
+    p = w.watcher()
+    w.step("gate.verify", "running", 1_000_000)
+    p.poll()
+    for m in (1, 2, 3):
+        w.step("gate.verify", "running", 1_000_000 + m * 60_000, note="still running")
+        p.poll()
+    cur = p.snapshot()[0]
+    assert (cur.step.stage, cur.step.state, cur.step.since) == ("gate.verify", "running", 1000.0)
+    assert cur.engine_seen_at == 1180.0
+    assert len(w.emitted("engine_step")) == 4
+
+
 def test_a_rotated_journal_is_read_with_its_older_half(w):
     p = w.watcher()
     w.step("deliver", "delivered", 1000)
