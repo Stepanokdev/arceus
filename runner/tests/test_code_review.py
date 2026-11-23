@@ -21,6 +21,8 @@ from .test_review import fix_and_settle, later, sends
 APPROVER_TOKEN = "glpat-approver-token-789"
 APPROVER = {"user": "acme-review-bot", "token_env": "GITLAB_REVIEW_TOKEN"}
 RID = "ACME-1.review-1"
+# What makes a blocker one the runner sends back: the requirement it breaks and how ordinary use reaches it.
+BACKED = {"breaks": "AC2: closing the tab logs out", "reached_by": "sign in, close the tab, open the app again"}
 
 
 @pytest.fixture(autouse=True)
@@ -390,13 +392,15 @@ def test_changes_go_back_to_the_author_and_its_fixes_are_reviewed_again_unasked(
     publish(w)
     ask(w)
     write_verdict(w, verdict="changes", requirements_met=False,
-                  findings=[{"severity": "blocker", "file": "app/login.py", "line": 3, "text": "No logout on close"},
+                  findings=[{"severity": "blocker", **BACKED, "file": "app/login.py", "line": 3, "text": "No logout on close"},
                             {"severity": "major", "text": "Unknown severity counts as a blocker"},
                             {"severity": "suggestion", "text": "Name it clearer"}])
     finish(w)
     [note] = review_notes(w)
     assert "changes are needed" in note and "`app/login.py:3`: No logout on close" in note
-    assert "Unknown severity counts as a blocker" in note.split("What has to change:")[1].split("Not approved")[0]
+    assert "Unknown severity counts as a blocker" not in note.split("What has to change:")[1].split("Not approved")[0]
+    assert "- Unknown severity counts as a blocker" in note.split("so not sent to the agent (a person decides):")[1]
+    assert "(breaks: AC2: closing the tab logs out; reached by: sign in, close the tab, open the app again)" in note
     assert "Sent to the agent to fix (round 1 of 3)" in note and w.gl.mrs[0].get("approved_by", []) == []
     [summary] = [t for t in w.bot_comments() if "code review of the merge requests" in t]
     assert "Sent to the agent to fix (round 1 of 3)" in summary
@@ -404,7 +408,8 @@ def test_changes_go_back_to_the_author_and_its_fixes_are_reviewed_again_unasked(
     [send] = sends(w)                                        # the findings, as a round for the author
     text = send["argv"][-1]
     assert "What the code review found that has to change" in text and "`app/login.py:3`: No logout on close" in text
-    assert "Unknown severity counts as a blocker" in text and "Name it clearer" not in text
+    assert "Unknown severity counts as a blocker" not in text and "Name it clearer" not in text
+    assert "reached by: sign in, close the tab" in text and "add nothing the ticket does not ask for" in text
     assert w.store.task("ACME-1").state == "dispatched" and w.yt.issue_fields["2-1"]["State"] == {"name": "In Progress"}
 
     sha = fix_and_settle(w, outcome="Logs out on close")     # the author pushes its fixes
@@ -430,7 +435,7 @@ def test_fix_rounds_run_out_and_a_person_takes_over(tmp_path):
     w = world(tmp_path, fix_rounds=1)
     publish(w)
     ask(w)
-    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", "text": "No logout on close"}])
+    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "text": "No logout on close"}])
     finish(w)
     later(w)
     sha = fix_and_settle(w)
@@ -438,7 +443,7 @@ def test_fix_rounds_run_out_and_a_person_takes_over(tmp_path):
     w.tick()
     w.tick()
     write_verdict(w, rid="ACME-1.review-2", verdict="changes",
-                  findings=[{"severity": "blocker", "text": "Still no logout"}])
+                  findings=[{"severity": "blocker", **BACKED, "text": "Still no logout"}])
     finish(w, rid="ACME-1.review-2")
     note = review_notes(w)[-1]
     assert "Still no logout" in note and "the 1 automatic fix rounds of this ticket are used up" in note
@@ -451,7 +456,7 @@ def test_with_no_fix_rounds_findings_go_back_only_when_a_person_passes_them_on(t
     w = world(tmp_path, fix_rounds=0)
     publish(w)
     ask(w)
-    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", "text": "No logout on close"}])
+    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "text": "No logout on close"}])
     finish(w)
     [note] = review_notes(w)
     assert "Nothing was sent to the agent (findings go back only when a person passes them on)" in note
@@ -463,7 +468,7 @@ def test_with_no_fix_rounds_findings_go_back_only_when_a_person_passes_them_on(t
 def test_a_fix_round_that_changes_no_code_is_not_reviewed_again(w):
     publish(w)
     ask(w)
-    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", "text": "No logout on close"}])
+    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "text": "No logout on close"}])
     finish(w)
     later(w)
     assert len(sends(w)) == 1
@@ -477,7 +482,7 @@ def test_a_fix_round_that_changes_no_code_is_not_reviewed_again(w):
 def test_findings_for_commits_the_mr_has_moved_past_are_not_sent(w):
     publish(w)
     ask(w)
-    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", "text": "No logout on close"}])
+    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "text": "No logout on close"}])
     w.gl.mrs[0].update(sha="f" * 40)                          # someone pushed while the review ran
     finish(w)
     [note] = review_notes(w)
@@ -490,7 +495,7 @@ def test_findings_for_commits_the_mr_has_moved_past_are_not_sent(w):
 def test_a_persons_review_request_after_the_fixes_is_used_instead_of_a_second_one(w):
     publish(w)
     ask(w)
-    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", "text": "No logout on close"}])
+    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "text": "No logout on close"}])
     finish(w)
     later(w)
     sha = fix_and_settle(w)
@@ -510,7 +515,7 @@ def test_a_persons_review_request_after_the_fixes_is_used_instead_of_a_second_on
 def test_a_continue_after_a_failure_drops_findings_that_never_reached_the_agent(w):
     publish(w)
     ask(w)
-    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", "text": "No logout on close"}])
+    write_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "text": "No logout on close"}])
     finish(w)
     [sig] = w.store.signals("ACME-1", unbatched=True)
     assert sig.kind == "code_review"
@@ -682,12 +687,166 @@ def test_a_question_for_the_product_owner_goes_to_people_not_to_the_agent(w):
     assert w.events_named("review_sent_back") == []
 
 
+@pytest.mark.parametrize("finding", [
+    {"severity": "blocker", "text": "A malformed stored tag breaks the read"},                        # names nothing
+    {"severity": "blocker", "breaks": "AC4: the page still loads", "text": "A malformed stored tag breaks the read"},
+    {"severity": "blocker", "breaks": "AC4", "reached_by": "  ", "text": "A malformed stored tag breaks the read"},
+    {"severity": "major", **BACKED, "text": "A malformed stored tag breaks the read"},          # unknown severity
+])
+def test_a_blocker_that_names_no_broken_requirement_or_way_to_reach_it_goes_to_people_not_the_agent(w, finding):
+    """Asked for without what it breaks and how ordinary use reaches it, a change is the reviewer's idea: the
+    agent would build what nobody asked for. Nothing is approved and nothing goes back; the note shows it."""
+    publish(w)
+    ask(w)
+    write_verdict(w, verdict="changes", requirements_met=False, findings=[finding])
+    finish(w)
+    [note] = review_notes(w)
+    assert "could not be confirmed" in note and "changes are needed" not in note
+    assert "- the reviewer asks for changes without naming, for each, the requirement it breaks" in note
+    assert "- A malformed stored tag breaks the read" in note.split("so not sent to the agent (a person decides):")[1]
+    assert approve_calls(w) == [] and w.store.review(RID).outcome == "unverified"
+    later(w)
+    assert sends(w) == [] and w.events_named("review_sent_back") == []
+
+
+def test_changes_or_an_unmet_ticket_with_no_blocker_named_is_not_sent_back(w):
+    publish(w)
+    ask(w)
+    write_verdict(w, verdict="ready", requirements_met=False)
+    finish(w)
+    [note] = review_notes(w)
+    assert "could not be confirmed" in note and "requirement it breaks" in note
+    assert "It does not do what the ticket asks." not in note
+    later(w)
+    assert sends(w) == [] and approve_calls(w) == []
+
+
+def test_only_the_backed_blocker_of_a_mixed_verdict_reaches_the_agent(w):
+    publish(w)
+    ask(w)
+    write_verdict(w, verdict="changes", findings=[
+        {"severity": "blocker", **BACKED, "file": "app/login.py", "line": 3, "text": "No logout on close"},
+        {"severity": "blocker", "file": "app/session.py", "line": 9,
+         "text": "Two tabs closing in the same millisecond could race"}])
+    finish(w)
+    [note] = review_notes(w)
+    assert "changes are needed" in note and "Sent to the agent to fix (round 1 of 3)" in note
+    assert "Two tabs closing" in note.split("so not sent to the agent (a person decides):")[1]
+    later(w)
+    [send] = sends(w)
+    text = send["argv"][-1]
+    assert "`app/login.py:3`: No logout on close (breaks: AC2: closing the tab logs out;" in text
+    assert "Two tabs closing" not in text
+
+
+def test_the_reviewer_is_told_not_to_add_requirements_and_to_back_each_blocker(w):
+    publish(w)
+    ask(w)
+    [review] = reviews(w)
+    brief = review["argv"][-1]
+    assert "Do not add requirements." in brief and "never ask to undo it" in brief
+    assert "`breaks` (what it breaks) and `reached_by` (how ordinary use reaches it)" in brief
+    assert "a race that needs several unlikely things to happen at once, is a suggestion" in brief
+    assert "only made-up input reaches, is grounds for FAIL" in brief
+
+
+def test_a_decision_made_only_on_the_merge_request_reaches_the_reviewer(w):
+    """People narrow a ticket on the MR as often as on the ticket: the reviewer reads what they wrote there, and
+    not the runner's own notes or the review's, nor the host's system notes."""
+    publish(w)
+    w.gl.note(1, "o.lead", "PO decision: Asset Library assets do not lock the role.", path="app/roles.py", line=7)
+    w.gl.note(1, w.gl.username, "Arceus addressed the review comments.")
+    w.gl.note(1, APPROVER["user"], "**Code review: changes are needed before merge.**")
+    w.gl.note(1, "o.lead", "added 2 commits", system=True)
+    ask(w)
+    [review] = reviews(w)
+    brief = review["argv"][-1]
+    section = brief.split("## Comments on the merge requests, oldest first")[1].split("## Merge requests to review")[0]
+    assert "- o.lead on " in section and "(app/roles.py:7)" in section
+    assert "PO decision: Asset Library assets do not lock the role." in section
+    assert "Arceus addressed" not in section and "Code review:" not in section and "added 2 commits" not in section
+    assert "on the ticket and on the merge requests, changed or narrowed it" in brief
+
+
+def test_a_new_comment_on_the_merge_request_makes_the_same_commits_reviewed_again(w):
+    publish(w)
+    ask(w)
+    write_verdict(w, tests="failed")
+    finish(w)
+    w.gl.note(1, "o.lead", "Keep the old fallback out: both MRs ship together.")
+    w.yt.comment("2-1", "j.doe", "/review")
+    w.tick()
+    again = w.store.review("ACME-1.review-2")
+    assert again.state != "refused" and again.reason != "already_reviewed"
+    assert "Keep the old fallback out" in reviews(w)[-1]["argv"][-1]
+
+
+def test_a_decision_written_on_the_merge_request_while_the_review_ran_stops_its_approval(w):
+    publish(w)
+    ask(w)
+    w.gl.note(1, "o.lead", "Decision: drop the fallback for the old connector.")   # same commit, review under way
+    write_verdict(w)
+    finish(w)
+    assert approve_calls(w) == [] and w.gl.mrs[0].get("approved_by", []) == []
+    [note] = review_notes(w)
+    assert "people commented on the merge requests while the review ran" in note
+
+
+@pytest.mark.parametrize("verdict", [
+    {"verdict": "changes", "findings": [{"severity": "blocker", **BACKED, "text": "Bring back the old connector fallback"}],
+     "summary": "Bring back the old connector fallback before merge."},
+    {"verdict": "ready", "findings": [{"severity": "suggestion", "text": "Bring back the old connector fallback"}],
+     "summary": "Ready: no problems found; the old connector fallback would be nice to have back."},
+])
+def test_a_decision_written_on_the_merge_request_while_the_review_ran_leaves_the_review_unconfirmed(w, verdict):
+    """People say on the MR to keep the old fallback out while the review ran: whatever it concluded answers an
+    older question. The MR and the ticket say it could not be confirmed, why, and to ask again; its summary and
+    findings are not posted, nothing is approved and nothing goes to the agent."""
+    publish(w)
+    ask(w)
+    w.gl.note(1, "o.lead", "Decision: keep the old connector fallback out, both MRs ship together.")
+    verdict = dict(verdict)
+    write_verdict(w, summary=verdict.pop("summary"), **verdict)
+    finish(w)
+    assert w.store.review(RID).outcome == "unverified" and approve_calls(w) == []
+    assert w.gl.mrs[0].get("approved_by", []) == []
+    [note] = review_notes(w)
+    assert note.startswith("**Code review: this merge request could not be confirmed.**")
+    assert "- people commented on the merge requests while the review ran" in note
+    assert "Write `/review` on the ticket to review it again." in note
+    assert "fallback" not in note and "no problems found" not in note and "Sent to the agent" not in note
+    [summary] = [t for t in w.bot_comments() if "code review of the merge requests" in t]
+    assert "the review could not confirm it" in summary and "Write `/review` again to repeat the review." in summary
+    assert "Not confirmed: people commented on the merge requests while the review ran." in summary
+    assert "fallback" not in summary and "no problems found" not in summary
+    later(w)
+    assert sends(w) == [] and w.events_named("review_sent_back") == []
+    assert w.store.signals_of_kind("ACME-1", "code_review") == []
+
+
+def test_a_verdict_judged_before_blockers_had_to_be_backed_does_not_stand(w):
+    """A repeat of an older review under the rules before this one gave the agent blockers that named nothing: asking
+    again for the same commits runs the review once more by today's rules."""
+    publish(w)
+    ask(w)
+    write_verdict(w, tests="failed")
+    finish(w)
+    with w.store.transaction():
+        snap = json.loads(w.store.review(RID).snapshot)
+        snap["rules"] = 3
+        w.store.update_review(RID, snapshot=json.dumps(snap))
+    w.yt.comment("2-1", "j.doe", "/review")
+    w.tick()
+    again = w.store.review("ACME-1.review-2")
+    assert again.state != "refused" and again.reason != "already_reviewed"
+
+
 def test_a_blocker_still_goes_back_with_the_open_question_marked_as_one_for_people(w):
     publish(w)
     ask(w)
     write_verdict(w, verdict="unsure", requirements_met=False,
                   unsure_because="whether active users are frozen too: the PO has to say",
-                  findings=[{"severity": "blocker", "file": "app/roles.py", "line": 7, "text": "Teacher is not replaced"}])
+                  findings=[{"severity": "blocker", **BACKED, "file": "app/roles.py", "line": 7, "text": "Teacher is not replaced"}])
     finish(w)
     [note] = review_notes(w)
     assert "changes are needed" in note and "Sent to the agent to fix (round 1 of 3)" in note
@@ -1006,7 +1165,7 @@ def test_two_merge_requests_get_a_verdict_each(w):
     write_verdict(w, entries=[
         {"mr": "M1", "verdict": "ready", "requirements_met": True, "build": "passed", "tests": "passed"},
         {"mr": "M2", "verdict": "changes", "requirements_met": True, "build": "passed", "tests": "passed",
-         "findings": [{"severity": "blocker", "file": "s.css", "text": "Breaks the dark theme"}]}])
+         "findings": [{"severity": "blocker", **BACKED, "file": "s.css", "text": "Breaks the dark theme"}]}])
     finish(w)
     assert w.gl.mrs[0]["approved_by"] == ["acme-review-bot"] and w.gl.mrs[1].get("approved_by", []) == []
     assert "ready to merge" in review_notes(w, 1)[0] and "Breaks the dark theme" in review_notes(w, 2)[0]
@@ -1028,7 +1187,7 @@ def test_a_later_review_takes_an_earlier_approval_back(w):
     ask(w, "/review")
     assert w.gl.mrs[0]["approved_by"] == ["acme-review-bot"] and not w.events_named("review_approval_revoked")
     write_verdict(w, rid="ACME-1.review-2", verdict="changes",
-                  findings=[{"severity": "blocker", "text": "The new file breaks the build"}])
+                  findings=[{"severity": "blocker", **BACKED, "text": "The new file breaks the build"}])
     finish(w, rid="ACME-1.review-2")
     assert w.gl.mrs[0]["approved_by"] == []
     [revoked] = w.events_named("review_approval_revoked")
@@ -1219,6 +1378,24 @@ def test_a_report_still_disputed_after_its_return_is_neither_approved_nor_sent_t
     assert "could not be confirmed" in note
 
 
+def test_a_disputed_report_sends_none_of_its_blockers_to_the_author(w):
+    """Codex still disputes the closing report at its limit, say because a blocker asks for more than the ticket:
+    the run backs nothing it found, so the MR is not approved and no blocker reaches the author."""
+    publish(w)
+    ask(w)
+    write_verdict(w, verdict="changes", findings=[
+        {"severity": "blocker", **BACKED, "text": "Order the overview events by time"}])
+    finish(w, **DISPUTED)
+    author_sends = len(sends(w)) - len(report_returns(w))
+    finish(w, **DISPUTED)
+    assert w.store.review(RID).outcome == "unverified" and approve_calls(w) == []
+    [note] = review_notes(w)
+    assert "could not be confirmed" in note and "Sent to the agent" not in note
+    later(w)
+    assert len(sends(w)) - len(report_returns(w)) == author_sends
+    assert w.store.signals_of_kind("ACME-1", "code_review") == [] and w.events_named("review_sent_back") == []
+
+
 def test_a_run_that_failed_for_another_reason_is_not_returned(w):
     publish(w)
     ask(w)
@@ -1329,9 +1506,9 @@ ENTRY = {"verdict": "ready", "requirements_met": True, "build": "passed", "tests
 
 @pytest.mark.parametrize("entries, why", [
     ([{"mr": "M1", **ENTRY},
-      {"mr": "M1", **ENTRY, "verdict": "changes", "findings": [{"severity": "blocker", "text": "Drops sessions"}]}],
+      {"mr": "M1", **ENTRY, "verdict": "changes", "findings": [{"severity": "blocker", **BACKED, "text": "Drops sessions"}]}],
      "more than one verdict"),
-    ([{"mr": "M1", **ENTRY, "findings": {"severity": "blocker", "text": "Drops sessions"}}], "`findings` is not a list"),
+    ([{"mr": "M1", **ENTRY, "findings": {"severity": "blocker", **BACKED, "text": "Drops sessions"}}], "`findings` is not a list"),
     ([{"mr": "M1", **ENTRY, "attention": {"file": "app/auth.py", "why": "changes login"}}], "`attention` is not a list"),
     ([{"mr": "M1", **ENTRY, "findings": [{"severity": "blocker"}]}], "findings has no readable text"),
 ])
@@ -1351,7 +1528,7 @@ def test_contradicting_verdicts_with_changes_first_stay_changes_and_say_so(w):
     publish(w)
     ask(w)
     write_verdict(w, entries=[
-        {"mr": "M1", **ENTRY, "verdict": "changes", "findings": [{"severity": "blocker", "text": "Drops sessions"}]},
+        {"mr": "M1", **ENTRY, "verdict": "changes", "findings": [{"severity": "blocker", **BACKED, "text": "Drops sessions"}]},
         {"mr": "M1", **ENTRY}])
     finish(w)
     [note] = review_notes(w)
@@ -1552,7 +1729,7 @@ def test_findings_on_people_code_go_to_the_ticket_and_never_to_an_agent(w):
     db_id = people_ticket(w, url)
     w.yt.comment(db_id, "j.doe", "/review")
     w.tick()
-    people_verdict(w, verdict="changes", findings=[{"severity": "blocker", "file": "uk.po", "line": 3,
+    people_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "file": "uk.po", "line": 3,
                                                     "text": "The plural forms are missing"}])
     finish(w, PEOPLE_RID)
     assert w.store.review(PEOPLE_RID).outcome == "changes"
@@ -1746,7 +1923,7 @@ def _blocked_people_mr(w: World) -> tuple[str, str, str]:
     db_id = people_ticket(w, url)
     w.yt.comment(db_id, "j.doe", "/review")
     w.tick()
-    people_verdict(w, verdict="changes", findings=[{"severity": "blocker", "file": "uk.po", "line": 3,
+    people_verdict(w, verdict="changes", findings=[{"severity": "blocker", **BACKED, "file": "uk.po", "line": 3,
                                                     "text": "The plural forms are missing"}])
     finish(w, PEOPLE_RID)
     assert w.store.review(PEOPLE_RID).outcome == "changes"

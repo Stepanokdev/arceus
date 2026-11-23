@@ -67,7 +67,7 @@ from arceus_runner.texts import ProjectNotesError
 from arceus_runner.engine import EngineError, ReportReview
 from arceus_runner.gitops import HOME_BRANCH, GitError, restore_workspace
 from arceus_runner.http import AuthError, NotFound, ServiceError
-from arceus_runner.integrations import Approval, Comment, Issue, IssueDetails, MRStatus, key_part
+from arceus_runner.integrations import Approval, Comment, Issue, IssueDetails, MRStatus, Note, key_part
 from arceus_runner.replies import decisions_file, unattributed
 from arceus_runner.screening import is_decision, trusted
 from arceus_runner.ticket_progress import SEPARATOR as PROGRESS_SEPARATOR
@@ -97,8 +97,10 @@ that verdict in words. The review changed no code. Judge the report by these poi
    code or the reviewer's logs contradict is grounds for FAIL.
 2. Every claim that something was run, passed or failed names the command and what it showed, or the file and line.
    A check that could not be run is said to be so, never called passed.
-3. A finding points to the place in the code it is about and says what is wrong there. A suggestion is not grounds
-   for FAIL.
+3. A finding points to the place in the code it is about and says what is wrong there. A blocker also names the
+   requirement or the working behaviour it breaks and how ordinary use reaches it; one that asks for more than the
+   ticket and the people's comments do, or that only made-up input reaches, is grounds for FAIL. A suggestion is not
+   grounds for FAIL.
 4. The report claims no more than the checks show, and the numbers it gives agree with what it lists.
 5. Data and state the checks made in throwaway places (a test database, a temporary file, a container started for
    the tests) are expected: naming where they ran is enough. Counting the records or tables they made, recovering
@@ -107,6 +109,8 @@ that verdict in words. The review changed no code. Judge the report by these poi
 
 Do not fail the report for its style, for exact counts that do not bear on the verdict, or for checks the ticket did
 not need."""
+UNBACKED = ("the reviewer asks for changes without naming, for each, the requirement it breaks and how ordinary use "
+            "reaches it, so a person decides whether they are needed")
 REPORT_ROUNDS = 5
 # On a server Codex checks the reviewer's closing report by REPORT_CRITERIA (the engine's report review, at its own
 # round limit). When it still disputes the report at that limit, the run ends `failed`/`needs-user` (`--report-at-limit
@@ -136,7 +140,7 @@ TESTS = ("passed", "failed", "failed_before", "not_run", "none")
 # How the runner judges a verdict. A final review stands for its commits only under the rules it was judged by: after
 # a change of them (2: tests that failed before the change no longer stop it; 3: each repository's build and tests are
 # judged by its own review_agent.repos), the same commits may be reviewed again.
-RULES = 3
+RULES = 4
 _MARKER = re.compile(r"<!--\s*arceus", re.IGNORECASE)
 _TRACKER_MARK = re.compile(r"\s*\[arceus:[^\]]*\]\s*$")
 _WORD = re.compile(r"[\w-]")
@@ -148,7 +152,9 @@ SCHEMA_EXAMPLE = """\
 {"summary": "Two or three sentences for the ticket.",
  "mrs": [{"mr": "M1", "verdict": "ready", "requirements_met": true, "build": "passed", "tests": "passed",
           "checked": "make verify: 132 tests passed",
-          "findings": [{"severity": "suggestion", "file": "app/login.py", "line": 40, "text": "…"}],
+          "findings": [{"severity": "blocker", "file": "app/login.py", "line": 40, "text": "…",
+                        "breaks": "…", "reached_by": "…"},
+                       {"severity": "suggestion", "file": "app/forms.py", "line": 12, "text": "…"}],
           "attention": [{"file": "app/accounts.py", "why": "…"}],
           "deploy": [{"file": "Dockerfile", "what": "…"}]}]}"""
 
@@ -279,15 +285,22 @@ def _load_verdict(path: Path, labels: set[str], max_suggestions: int) -> tuple[d
             if not isinstance(f, dict) or not _clean(f.get("text")):
                 doubts.append("one of its findings has no readable text")
                 continue
-            # Anything but an explicit suggestion stops the merge: an unknown severity is not a pass.
-            severity = "suggestion" if f.get("severity") == "suggestion" else "blocker"
-            if severity == "suggestion":
+            # A blocker counts only with what it breaks and how ordinary use reaches it. Without both, or with an
+            # unknown severity, it is "unsupported": not a pass, and not a fix for the agent either.
+            breaks, reached_by = _clean(f.get("breaks"), 800), _clean(f.get("reached_by"), 800)
+            if f.get("severity") == "suggestion":
+                severity = "suggestion"
                 suggestions += 1
                 if suggestions > max_suggestions:
                     continue
+            elif f.get("severity") == "blocker" and breaks and reached_by:
+                severity = "blocker"
+            else:
+                severity = "unsupported"
             line = f.get("line") if isinstance(f.get("line"), int) and not isinstance(f.get("line"), bool) else None
             findings.append({"severity": severity, "text": _clean(f.get("text"), 1500),
-                             "file": _clean(f.get("file"), 300), "line": line})
+                             "file": _clean(f.get("file"), 300), "line": line,
+                             "breaks": breaks, "reached_by": reached_by})
         attention = []
         for a in e.get("attention") if isinstance(e.get("attention"), list) else []:
             if not isinstance(a, dict) or not (_clean(a.get("file")) or _clean(a.get("why"))):
@@ -316,6 +329,12 @@ def _load_verdict(path: Path, labels: set[str], max_suggestions: int) -> tuple[d
             "doubts": list(dict.fromkeys(doubts)),
         }
     return out, _clean(data.get("summary")), problems
+
+
+def _said(mr_comments: list[tuple[str, Note]]) -> str:
+    """What people wrote on the merge requests, as one digest: an edit or a deletion counts."""
+    return hashlib.sha256(json.dumps([[repo, str(n.id), n.author, n.body] for repo, n in mr_comments])
+                          .encode()).hexdigest()
 
 
 def _digest(issue: IssueDetails) -> str:
@@ -383,6 +402,14 @@ class ReviewAgent:
         return [x for x in self.tracker.comments(task.issue_db_id)
                 if not is_decision(x.text) and not (x.author == bot and "[arceus:security" in x.text)]
 
+    def _mr_comments(self, mrs: list[dict]) -> list[tuple[str, Note]]:
+        """What people wrote on the merge requests under review, oldest first, with each one's repository: a decision
+        made there narrows the ticket as much as one on the ticket. The runner's notes and the review's are left out."""
+        ours = {self.cfg.code_host.bot_user, self.host.reviewer}
+        said = [(m["repo"], n) for m in mrs for n in self.host.notes(m["project_id"], m["iid"], m["url"])
+                if not n.system and n.author not in ours and n.body.strip()]
+        return sorted(said, key=lambda x: x[1].created_at)
+
     def _context(self, task: Task, issue: IssueDetails) -> str:
         """What people asked for, as one digest: the summary, the description and every comment people wrote
         (by id, author and text, so an edit or a deletion counts), the requests to the reviewer left out."""
@@ -414,8 +441,15 @@ class ReviewAgent:
         issue = self.tracker.issue(task.task_id)
         if issue.state != c.states.code_review:
             return f"the ticket is no longer in {c.states.code_review} (it is in {issue.state or 'no state'})"
+        return self._context_problem(task, snap, issue)
+
+    def _context_problem(self, task: Task, snap: dict, issue: IssueDetails | None = None) -> str | None:
+        """What people asked for changed while the review ran, so its verdict answers an older question; or None."""
+        issue = issue or self.tracker.issue(task.task_id)
         if self._context(task, issue) != snap["ticket"]["context"]:
             return "the ticket's description or comments changed while the review ran"
+        if "mr_comments" in snap and _said(self._mr_comments(snap["mrs"])) != snap["mr_comments"]:
+            return "people commented on the merge requests while the review ran"
         return None
 
     def _verdict_file(self, row: ReviewRequest) -> Path:
@@ -739,24 +773,27 @@ class ReviewAgent:
             return
         # The same commits, merged into the same branches, against the same ticket: the earlier verdict stands.
         context = self._context(task, issue)
-        reviewed = ({(m["repo"], m["sha"], m["target"]) for m in mrs}, context)
+        mr_comments = self._mr_comments(mrs)
+        said = _said(mr_comments)
+        reviewed = ({(m["repo"], m["sha"], m["target"]) for m in mrs}, context, said)
         for earlier in self.store.reviews("done", task_id=task.task_id):
             then = json.loads(earlier.snapshot)
             if earlier.outcome in FINAL and then.get("rules", 1) == RULES and (
                     {(m["repo"], m["sha"], m["target"]) for m in then.get("mrs", [])},
-                    then.get("ticket", {}).get("context")) == reviewed:
+                    then.get("ticket", {}).get("context"), then.get("mr_comments")) == reviewed:
                 self._refuse(row, task, "already_reviewed", f"these commits were already reviewed (see the review "
                                                             f"{earlier.id} above); nothing changed since, so it "
                                                             "stands.", outcome="refused")
                 return
         comments = self._ticket_comments(task)
         files = self._files(task, comments)
-        text = self._compose(row, task, issue, comments, mrs)
+        text = self._compose(row, task, issue, comments, mrs, mr_comments)
         if files:
             texts = [("the description", None, issue.description),
                      *((f"the comment by {x.author} of {_when(x.created)}", str(x.id), x.text) for x in comments)]
             text, files = materials.with_section(text, files, self.d._files_folder(task), texts)
-        authors = [row.author, *issue.writers, *(x.author for x in comments), *(m.attachment.author for m in files)]
+        authors = [row.author, *issue.writers, *(x.author for x in comments), *(n.author for _, n in mr_comments),
+                   *(m.attachment.author for m in files)]
         clearance = self.d.gate.clear(task, "review_request", text, authors=authors, resume_state=task.state,
                                       ref=row.id, files=materials.screen_files(files))
         if clearance is None:
@@ -764,7 +801,7 @@ class ReviewAgent:
         snapshot = {"branch": branch, "text": text, "authors": authors, "skipped": skipped,
                     "home_prev": self.git.current_branch(home) if (home / ".git").exists() else None,
                     "ticket": {"context": context, "requirements": self._requirements(task, issue)}, "mrs": mrs,
-                    "rules": RULES}
+                    "mr_comments": said, "rules": RULES}
         row = self.store.update_review(row.id, state="preparing", snapshot=json.dumps(snapshot),
                                        started_at=self.d.now().isoformat())
         self._waiting.pop(row.id, None)
@@ -1028,8 +1065,6 @@ class ReviewAgent:
                 continue
             v = mr["verdict"] or {}
             items = [self._finding(f) for f in v.get("findings", []) if f.get("severity") == "blocker"]
-            if v.get("requirements_met") is False and not items:
-                items.append("It does not do what the ticket asks.")
             for what in ("build", "tests"):
                 if v.get(what) == "failed":
                     items.append(f"The {what} failed when the reviewer ran them.")
@@ -1040,8 +1075,9 @@ class ReviewAgent:
             parts.append(f"{mr['repo']} ({mr['url']}), reviewed at `{mr['sha'][:12]}`:\n"
                          + "\n".join(f"  - {i}" for i in items or ["see the review note on the MR"]))
         return (f"The code review {row.id} found these; the whole review is the note on the MR.\n"
-                + "\n".join(parts) + "\n  Fix each one with new commits. If one is wrong, change nothing for it and "
-                "say why in your result. The runner reviews your new commits again.")
+                + "\n".join(parts) + "\n  Fix each one with new commits, changing only what it names: add nothing "
+                "the ticket does not ask for. If one is wrong, change nothing for it and say why in your result. The "
+                "runner reviews your new commits again.")
 
     def _fix_round(self, row: ReviewRequest, task: Task) -> int | None:
         """Which fix round this review's findings went to the author as, or None if they did not."""
@@ -1110,6 +1146,7 @@ class ReviewAgent:
         verdict = json.loads(row.verdict or "{}")
         found = verdict.get("mrs") or {}
         ticket = self._ticket_problem(task, snap)
+        changed = self._context_problem(task, snap) if ticket else None
         fatal = verdict.get("fatal") or []
         settled = datetime.fromisoformat(verdict.get("settled_at") or self.d.now().isoformat())
         can_wait = self.d.now() - settled < self.rc.timeout
@@ -1143,33 +1180,49 @@ class ReviewAgent:
             elif v is None:
                 kind = "unverified"
                 reasons.append("the reviewer left no verdict for it")
-            elif v["verdict"] == "changes" or build == "failed" or tests == "failed" \
-                    or any(f["severity"] == "blocker" for f in v["findings"]) \
-                    or (v["requirements_met"] is False and v["verdict"] != "unsure"):
+            elif fatal:
+                # A run that never finished as asked (a closing report Codex still disputes, a stop to ask) backs
+                # none of its verdict: no approval, and none of its blockers go to the author either.
+                kind = "unverified"
+                reasons += [*fatal, *v.get("doubts", [])]
+            elif build == "failed" or tests == "failed" or any(f["severity"] == "blocker" for f in v["findings"]):
+                # Only what the agent can act on goes back to it: a failure seen, or a blocker that names what it
+                # breaks and how ordinary use reaches it.
                 kind = "changes"
                 reasons += v.get("doubts", [])
-            elif v["verdict"] == "unsure" or v["requirements_met"] is None or not build_ok or not tests_ok:
+            elif v["verdict"] in ("unsure", "changes") or v["requirements_met"] is not True or not build_ok \
+                    or not tests_ok or any(f["severity"] == "unsupported" for f in v["findings"]):
                 # "Unsure" with nothing that must change is a question for people (an open product decision, a fact
-                # outside the repository): the agent cannot answer it, so it is never sent back as a fix.
+                # outside the repository): the agent cannot answer it, so it is never sent back as a fix. So is a
+                # call for changes that names no broken requirement or no ordinary way to reach it: a person
+                # decides whether it is needed, rather than the agent building what nobody asked for.
                 kind = "unverified"
+                unbacked = v["verdict"] == "changes" or any(f["severity"] == "unsupported" for f in v["findings"]) \
+                    or (v["requirements_met"] is False and v["verdict"] != "unsure")
                 if v["verdict"] == "unsure":
                     reasons.append(v["unsure_because"] or "the reviewer could not tell whether it is right, and did "
                                                            "not say why")
+                if unbacked:
+                    reasons.append(UNBACKED)
                 if v["requirements_met"] is None:
                     reasons.append("the reviewer did not say whether it meets the ticket")
-                elif v["requirements_met"] is False:
+                elif v["requirements_met"] is False and v["verdict"] == "unsure":
                     reasons.append("until that is answered, the reviewer cannot say it meets the ticket")
                 if not build_ok:
                     reasons.append(self._not_run("build", checks.ci_build_jobs))
                 if not tests_ok:
                     reasons.append(self._not_run("tests", checks.ci_test_jobs))
-            elif fatal or v.get("doubts"):
-                # A verdict written before the run hung or stopped to ask, or one the runner could not read
-                # whole, is not a pass.
+            elif v.get("doubts"):
+                # A verdict the runner could not read whole is not a pass.
                 kind = "unverified"
-                reasons += [*fatal, *v.get("doubts", [])]
+                reasons += v.get("doubts", [])
             else:
                 kind = "ready"
+            if changed and kind != "closed":
+                # Whatever it found answers what people asked before: no approval on it, no fixes passed on that the
+                # newer word may rule out; a person asks for the review again.
+                kind = "unverified"
+                reasons.append(changed)
             moved = bool(st.sha) and st.sha != m["sha"]
             retargeted = bool(st.target) and st.target != m["target"]
             if moved:
@@ -1188,9 +1241,10 @@ class ReviewAgent:
                     reasons.append(f"Arceus has no approver account on {self.host.label}, so it cannot approve")
             mrs.append({k: m[k] for k in ("label", "repo", "project_id", "iid", "url", "sha", "target")} | {
                 "kind": kind, "approve": kind == "ready" and not reasons and self.enabled, "reasons": reasons,
+                "stale": bool(changed) and kind != "closed",
                 "risky": risky, "ci": ci, "verdict": v, "in_ci": in_ci, "not_needed": not_needed})
         return {"off": not self.enabled, "mrs": mrs, "summary": verdict.get("summary") or "",
-                "problems": verdict.get("problems") or []}
+                "problems": verdict.get("problems") or [], "stale": changed or ""}
 
     def _ci_jobs(self, st: MRStatus, m: dict, patterns: list[str]) -> list[str] | None:
         """The jobs of the reviewed commit's CI run that match `patterns`, when there is one and all of them
@@ -1504,6 +1558,10 @@ class ReviewAgent:
         why = (f"again after the agent's fixes for {_auto_of(row)}"
                if row.comment_id.startswith(AUTO_PREFIX) else f"as {row.author} asked on the ticket")
         lines = [head, "", f"Reviewed at commit `{mr['sha'][:12]}` against {task.task_id}, {why}.", ""]
+        if mr.get("stale"):
+            return "\n".join([*lines, "Why:", *(f"- {r}" for r in mr["reasons"]), "",
+                               "What the review found answers what people asked before that, so none of it is shown "
+                               f"here. Not approved. Write `{self.rc.command}` on the ticket to review it again."])
         if v:
             met = {True: "met", False: "not met", None: "not judged"}[v["requirements_met"]]
             in_ci = mr.get("in_ci") or {}
@@ -1531,8 +1589,6 @@ class ReviewAgent:
                       *(f"- `{f}`" + (f": {why}" if why else "") for f, why in attention)]
         elif outcome == "changes":
             lines += ["What has to change:", *(f"- {self._finding(f)}" for f in blockers)]
-            if v and v["requirements_met"] is False and not blockers:
-                lines.append("- It does not do what the ticket asks.")
             if v and "failed" in (v["build"], v["tests"]):
                 lines.append(f"- The {'build' if v['build'] == 'failed' else 'tests'} failed.")
             if v and v["verdict"] == "unsure" and v["unsure_because"]:
@@ -1550,6 +1606,10 @@ class ReviewAgent:
         if deploy:
             lines += ["", "For whoever deploys it (no decision needed before merge):",
                       *(f"- `{f}`: {what}" if f else f"- {what}" for f, what in deploy)]
+        unsupported = [f for f in v.get("findings", []) if f["severity"] == "unsupported"]
+        if unsupported:
+            lines += ["", "Asked for without the requirement it breaks or an ordinary way to reach it, so not sent to "
+                      "the agent (a person decides):", *(f"- {self._finding(f)}" for f in unsupported)]
         if suggestions:
             lines += ["", "Suggestions (not blocking):", *(f"- {self._finding(f)}" for f in suggestions)]
         return "\n".join(lines)[:60000]
@@ -1557,7 +1617,10 @@ class ReviewAgent:
     @staticmethod
     def _finding(f: dict) -> str:
         where = f["file"] + (f":{f['line']}" if f["file"] and f["line"] else "")
-        return (f"`{where}`: " if where else "") + f["text"].replace("\n", " ")
+        text = (f"`{where}`: " if where else "") + f["text"].replace("\n", " ")
+        if f.get("severity") == "blocker" and f.get("breaks") and f.get("reached_by"):
+            text += f" (breaks: {f['breaks']}; reached by: {f['reached_by']})".replace("\n", " ")
+        return text
 
     def _ticket_text(self, row: ReviewRequest, task: Task, result: dict, overall: str) -> str:
         who = self.tracker.mention(row.author)
@@ -1582,7 +1645,10 @@ class ReviewAgent:
         skipped = json.loads(row.snapshot or "{}").get("skipped") or []
         if skipped:
             lines += ["", "Not reviewed:", *(f"- {x['url']}: {x['why']}." for x in skipped)]
-        if result["summary"]:
+        if result.get("stale"):
+            lines += ["", f"Not confirmed: {result['stale']}. What the review found answers what people asked before "
+                      "that, so it is left out."]
+        elif result["summary"]:
             lines += ["", result["summary"]]
         if result["problems"] and overall in ("unverified", "nothing"):
             lines += ["", "What got in the way: " + "; ".join(result["problems"][:5]) + "."]
@@ -1593,7 +1659,7 @@ class ReviewAgent:
         return "\n".join(lines)
 
     def _compose(self, row: ReviewRequest, task: Task, issue: IssueDetails, comments: list[Comment],
-                 mrs: list[dict]) -> str:
+                 mrs: list[dict], mr_comments: list[tuple[str, Note]]) -> str:
         """The reviewer's brief: the ticket whole, the MRs and how to answer. The same inputs give the same
         text, so a repeat is the same message for the engine and the same text for the screen."""
         bot = self.cfg.tracker.bot_user
@@ -1623,7 +1689,15 @@ class ReviewAgent:
             lines.append(f"- {who}, {_when(x.created)}: {body}")
         if not shown:
             lines.append("(none)")
-        lines += ["", "The requirements are the description as the later comments changed or narrowed it.", "",
+        lines += ["", "## Comments on the merge requests, oldest first", ""]
+        for repo, n in mr_comments:
+            where = f" ({n.path}:{n.line})" if n.path else ""
+            when = n.created_at[:16].replace("T", " ") + " UTC" if n.created_at else "at an unknown time"
+            lines.append(f"- {n.author} on {repo}{where}, {when}: {n.body.strip().replace(chr(10), chr(10) + '  ')}")
+        if not mr_comments:
+            lines.append("(none)")
+        lines += ["", "The requirements are the description as the later comments, on the ticket and on the merge "
+                  "requests, changed or narrowed it.", "",
                   "## Merge requests to review", ""]
         for m in mrs:
             lines += [f"### {m['label']} · {m['repo']}", m["url"],
@@ -1645,8 +1719,16 @@ class ReviewAgent:
         if not task.people_work:
             lines += [f"Why the author chose what it did, if it wrote it down: {decisions_file(ws, task.task_id)}.", ""]
         lines += ["## What to check in each merge request", "",
-                  "1. Requirements. Does the change do what the ticket asks, all of it, and nothing it did not ask "
-                  "for? Missing or wrong behaviour is a blocker.",
+                  "1. Requirements. Does the change do what the ticket asks, all of it? The requirements are the "
+                  "ticket's description, acceptance criteria and design notes, as people's comments on the ticket or "
+                  "the merge requests later changed or narrowed them. Read each criterion as it is written. A "
+                  "decision a person wrote down is a requirement even where you would have chosen otherwise: never "
+                  "ask to undo it. Where a criterion reads two ways and the answer changes the code, that is a "
+                  "question for people (\"unsure\"), not a blocker. Missing or wrong behaviour is a blocker.",
+                  "   Do not add requirements. Validation, hardening, retries, fallbacks, ordering or concurrency "
+                  "guarantees, logging, tooling and refactors that neither the ticket nor a person asked for are not "
+                  "requirements, however sensible: never a blocker. What the change adds that the ticket did not ask "
+                  "for is a suggestion that names it as outside the ticket.",
                   "2. Build and tests. Build the project and run its tests the way the repository does it (README, "
                   "Makefile, verify.sh, CI config). Say what you ran. A repository without tests is \"none\", not "
                   "\"passed\". If something cannot run here (a service, a secret, the network), say so and use "
@@ -1694,9 +1776,18 @@ class ReviewAgent:
                   f"4. Improvements. Only what matters: bugs, missing tests for new behaviour, a clear maintainability "
                   f"problem. Style preferences are not findings. At most {self.rc.max_suggestions} suggestions per "
                   "merge request.", "",
-                  "A blocker is something that must change before merge: wrong or missing behaviour, or a test the "
-                  "ticket requires that is missing entirely. Tests that exist and pass but could be stronger are a "
-                  "suggestion. Everything else is a suggestion and does not stop the merge.", "",
+                  "A blocker is something that must change before merge, and you can say both of these about it:",
+                  "- what it breaks: a requirement by point 1 (quote the ticket or the comment) or behaviour that works "
+                  "on the target branch;",
+                  "- how ordinary use reaches it: the steps a real user, a producer in these repositories or a "
+                  "service the system works with takes in the setup the ticket describes, ending in the wrong result; "
+                  "for a test the ticket requires that is missing entirely, where the ticket requires it.",
+                  "What only made-up input reaches (a database row nothing writes, a payload no producer sends, a "
+                  "value the code's own checks already refuse), or a race that needs several unlikely things to "
+                  "happen at once, is a suggestion: say what would make it reachable. Tests that exist and pass but "
+                  "could be stronger are a suggestion. Everything else is a suggestion and does not stop the merge. "
+                  "A blocker without both is not counted as one: the runner leaves that merge request to a person "
+                  "instead of sending it back to the author.", "",
                   "## Your verdict", "",
                   f"Write it to {self._verdict_file(row)} as JSON, one entry per merge request:", "", "```json",
                   SCHEMA_EXAMPLE, "```", "",
@@ -1712,7 +1803,8 @@ class ReviewAgent:
                   "failed_before, not_run, none): what you saw yourself.",
                   "- `checked`: the commands you ran and what they showed, in a line or two.",
                   "- `findings`: `severity` is \"blocker\" or \"suggestion\"; `file` and `line` when it is about a "
-                  "place in the code.",
+                  "place in the code. A blocker also has `breaks` (what it breaks) and `reached_by` (how ordinary use "
+                  "reaches it).",
                   "- `attention`: what a person has to decide before merge, by point 3, each `why` the question they "
                   "must answer; an empty list when there is nothing.",
                   "- `deploy`: what whoever deploys it should know or do, by point 3; an empty list when there is "
