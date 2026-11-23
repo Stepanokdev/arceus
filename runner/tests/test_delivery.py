@@ -471,6 +471,40 @@ def test_hung_attempt_fails_after_the_timeout(w):
     assert [c["argv"][0] for c in w.calls("night-shift")][-1] == "stop"
 
 
+def test_a_busy_attempt_is_not_hung_and_ends_at_its_ceiling_saying_where(w):
+    """Eight hours of review rounds with a step every few minutes is work, not a hang (a ticket was failed as
+    "the agent hung" in its fifth review round): silence is counted from the last step, and a busy attempt
+    ends at attempt_ceiling, naming the step it was on."""
+    from arceus_runner.progress import Step, TaskProgress
+    take(w)
+    start = datetime.now(UTC)  # the fake engine stamps the attempt with the real clock
+    p = w.runner.progress.tasks.setdefault("ACME-1", TaskProgress("ACME-1"))
+    for h in (3, 6, 9, 12):
+        w.now = start + timedelta(hours=h)
+        p.step = Step("gate.review", "retrying", (w.now - timedelta(minutes=2)).timestamp())
+        w.tick()
+        assert w.store.task("ACME-1").state == "dispatched"
+    w.now = start + timedelta(hours=21)  # 9 h since the last step
+    w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "failed" and task.reason.startswith("the agent hung: no sign of activity for 8 h")
+    assert "(last step: gate.review retrying)" in task.reason
+
+
+def test_a_busy_attempt_stops_at_the_ceiling(w):
+    from arceus_runner.progress import Step, TaskProgress
+    take(w)
+    start = datetime.now(UTC)  # the fake engine stamps the attempt with the real clock
+    p = w.runner.progress.tasks.setdefault("ACME-1", TaskProgress("ACME-1"))
+    for h in range(2, 26, 2):
+        w.now = start + timedelta(hours=h)
+        p.step = Step("gate.verify", "running", w.now.timestamp())
+        w.tick()
+    task = w.store.task("ACME-1")
+    assert task.state == "failed" and task.reason.startswith("the attempt ran out of time: no verdict in 24 h")
+    assert "gate.verify running" in task.reason and [c["argv"][0] for c in w.calls("night-shift")][-1] == "stop"
+
+
 def test_an_mr_refused_while_gitlab_does_not_know_the_pushed_branch_yet_is_asked_again(w, monkeypatch):
     """GitLab's API learns of a pushed branch a moment after the push: the MR is asked for again a few seconds
     apart, in the same tick, and only one is made."""

@@ -118,6 +118,9 @@ class Delivery:
                                    comment_with_media=self.comment_with_media, hold_back=self.platforms_missing,
                                    journal_merges=self.journal_merges, arm_merges=self.arm_merges)
         self.reviewer = None  # code_review.ReviewAgent, set by the loop: told of MRs and merges (review.py)
+        # task id → (epoch seconds of its last sign of life, "stage state"), set by the loop from the
+        # progress watcher; None leaves the attempt's start as the only clock.
+        self.activity: Callable[[str], tuple[float | None, str]] | None = None
 
     @property
     def review(self):
@@ -1019,10 +1022,25 @@ class Delivery:
         times = [t for t in (parse_ts((attempts[-1] if attempts else {}).get("started_at")),
                              parse_ts(task.attempt_started)) if t]
         started = max(times) if times else None
-        limit = self.cfg.limits.attempt_timeout
-        if started and self.now() - started > limit:
+        if not started:
+            return
+        # Silence is measured from the attempt's last sign of life — a step of the engine (the gate, the
+        # verifier, a review round) or the agent writing — not from its start. An attempt busy in its
+        # fifth review round for eight hours, with a step every few minutes, was failed as "the agent
+        # hung", and its continuation was told it had hung. A working attempt still ends at the ceiling,
+        # and says where it was.
+        last, where = self.activity(task.task_id) if self.activity else (None, "")
+        quiet_from = max(started, datetime.fromtimestamp(last, UTC)) if last else started
+        limit, ceiling, now = self.cfg.limits.attempt_timeout, self.cfg.limits.attempt_ceiling, self.now()
+        hours = lambda d: f"{d.total_seconds() / 3600:.0f} h"  # noqa: E731
+        if now - started > ceiling:
             self.engine.stop(Path(task.repo_path))
-            self.fail(task, f"the agent hung: no result in {limit.total_seconds() / 3600:.0f} h", attempt=len(attempts))
+            self.fail(task, f"the attempt ran out of time: no verdict in {hours(ceiling)}, still working"
+                            + (f" (last step: {where})" if where else ""), attempt=len(attempts))
+        elif now - quiet_from > limit:
+            self.engine.stop(Path(task.repo_path))
+            self.fail(task, f"the agent hung: no sign of activity for {hours(limit)}"
+                            + (f" (last step: {where})" if where else ""), attempt=len(attempts))
 
     def _resume(self, task: Task, attempt: int) -> None:
         if not self.workspace.followup_ready(task):

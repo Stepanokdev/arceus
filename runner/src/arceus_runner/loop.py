@@ -156,6 +156,8 @@ class Runner:
                                         quiet_after=cfg.limits.agent_quiet_after,
                                         others=(cfg.qa.workspace,) if cfg.qa.workspace else ()) if self.delivery else None
         self.ticket_progress = TicketProgress(self.delivery, self.progress, now) if self.progress else None
+        if self.progress:
+            self.delivery.activity = self._activity
         self.last_tick: float | None = None  # wall clock of the last finished tick, for the metrics
         self.cleanup = cleanup
         self.engine = engine
@@ -170,6 +172,14 @@ class Runner:
         self._unknown_trigger: set[str] = set()
 
     # -- health -------------------------------------------------------------
+
+    def _activity(self, task_id: str) -> tuple[float | None, str]:
+        """The last sign of life of a task's attempt the progress watcher saw, and the step it was on."""
+        p = self.progress.tasks.get(task_id) if self.progress else None
+        if not p:
+            return None, ""
+        times = [t for t in ((p.step.since if p.step else None), p.agent_active_at) if t]
+        return (max(times) if times else None), (f"{p.step.stage} {p.step.state}" if p.step else "")
 
     def _record_health(self, checks: list[Check]) -> None:
         changed = False
